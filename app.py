@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0'
 SHEET_NAME = 'Orders 3.1'
-RANGE_NAME = f'{SHEET_NAME}!A1'
+RANGE_NAME = f'{SHEET_NAME}!A1'  # Still used as a base, but we'll adjust dynamically
 
 # Load credentials and secret key from environment
 SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
 
-# Check if running on Render (or any non-local env)
-IS_RENDER = os.getenv('RENDER') == 'true'  # Render sets this env var
+# Check if running on Render
+IS_RENDER = os.getenv('RENDER') == 'true'
 
 try:
     if IS_RENDER:
@@ -63,13 +63,20 @@ def group_skus_by_vendor(line_items):
             sku_by_vendor[vendor].append(sku)
     return sku_by_vendor
 
+# Helper function to get the last row
+def get_last_row():
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
+    ).execute()
+    values = result.get('values', [])
+    return len(values) + 1 if values else 1  # Return next row (1 if empty)
+
 # Route to handle incoming POST requests from Flow
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     if not service:
         return jsonify({"error": "Google Sheets API not initialized"}), 500
 
-    # Check secret key
     provided_key = request.args.get('key')
     if provided_key != SECRET_KEY:
         return jsonify({"error": "Access Denied"}), 403
@@ -106,10 +113,12 @@ def add_new_orders(data):
         for vendor, skus in sku_by_vendor.items()
     ]
 
-    # Append to sheet
+    # Get the next available row and write there
+    start_row = get_last_row()
+    range_to_write = f'{SHEET_NAME}!A{start_row}'
     body = {'values': rows_data}
-    result = service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID, range=RANGE_NAME,
+    result = service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID, range=range_to_write,
         valueInputOption='RAW', body=body
     ).execute()
 
@@ -133,10 +142,12 @@ def add_backup_shipping_note(data):
         for vendor, skus in sku_by_vendor.items()
     ]
 
-    # Append to sheet (11 columns, A:K)
+    # Get the next available row and write there
+    start_row = get_last_row()
+    range_to_write = f'{SHEET_NAME}!A{start_row}:K{start_row + len(rows_data) - 1}'
     body = {'values': rows_data}
-    result = service.spreadsheets().values().append(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A1:K',
+    result = service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID, range=range_to_write,
         valueInputOption='RAW', body=body
     ).execute()
 
@@ -150,7 +161,6 @@ def remove_fulfilled_sku(data):
     order_number = data.get("order_number")
     line_items = data.get("line_items", [])
 
-    # Fetch current sheet data
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
     ).execute()
@@ -163,7 +173,6 @@ def remove_fulfilled_sku(data):
                 if item['sku'] in skus:
                     skus.remove(item['sku'])
             if not skus:
-                # Clear row if no SKUs left (API can't delete rows directly)
                 service.spreadsheets().values().clear(
                     spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:K{i+1}'
                 ).execute()
@@ -206,7 +215,7 @@ def delete_rows():
     rows_to_clear = []
 
     for i, row in enumerate(values):
-        sku_cell = row[3] if len(row) > 3 else ''  # Column D (index 3)
+        sku_cell = row[3] if len(row) > 3 else ''
         if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
             rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:K{i+1}')
 
@@ -224,7 +233,7 @@ def delete_duplicate_rows():
     rows_to_clear = []
 
     for i, row in enumerate(values):
-        row_str = ','.join(map(str, row))  # Convert all elements to string
+        row_str = ','.join(map(str, row))
         if row_str in unique_rows:
             rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:K{i+1}')
         else:
@@ -235,7 +244,6 @@ def delete_duplicate_rows():
             spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
-# Health check route
 @app.route('/', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"}), 200
