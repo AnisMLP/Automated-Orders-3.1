@@ -27,16 +27,22 @@ RANGE_NAME = f'{SHEET_NAME}!A1'
 SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
 
+# Check if running on Render (or any non-local env)
+IS_RENDER = os.getenv('RENDER') == 'true'  # Render sets this env var
+
 try:
-    if GOOGLE_CREDENTIALS:
-        # Load credentials from environment variable (Render)
+    if IS_RENDER:
+        if not GOOGLE_CREDENTIALS:
+            raise ValueError("GOOGLE_CREDENTIALS environment variable is not set on Render")
+        logger.info("Loading credentials from GOOGLE_CREDENTIALS on Render")
         creds = service_account.Credentials.from_service_account_info(
             json.loads(GOOGLE_CREDENTIALS), scopes=SCOPES)
     else:
-        # Fallback to file for local testing
+        logger.info("Running locally, falling back to credentials.json")
         creds = service_account.Credentials.from_service_account_file(
             'credentials.json', scopes=SCOPES)
     service = build('sheets', 'v4', credentials=creds)
+    logger.info("Google Sheets API initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
