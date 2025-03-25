@@ -6,12 +6,7 @@ from google.oauth2 import service_account
 import os
 import json
 from dotenv import load_dotenv
-import queue
-import threading
-import time
-from googleapiclient.errors import HttpError
 
-# Load .env file
 load_dotenv()
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -19,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0'
+SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0' # PSA: Change needed
 SHEET_NAME = 'Orders 3.1'
 RANGE_NAME = f'{SHEET_NAME}!A1'
 SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
@@ -43,75 +38,30 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-# Queue and list for orders
-order_queue = queue.Queue()
-queued_orders = []
-
-# Helper functions
 def format_date(date_str):
     date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
     return f"{date.year}-{str(date.month).zfill(2)}-{str(date.day).zfill(2)}"
 
+
 def group_skus_by_vendor(line_items):
     sku_by_vendor = {}
     for item in line_items:
-        sku, vendor = item['sku'], item.get('vendor', '')  # Default to '' if vendor missing
+        sku, vendor = item['sku'], item['vendor']
         if vendor not in sku_by_vendor:
             sku_by_vendor[vendor] = [sku]
         else:
             sku_by_vendor[vendor].append(sku)
     return sku_by_vendor
 
+
 def get_last_row():
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
     ).execute()
     values = result.get('values', [])
-    return len(values) + 1 if values else 1
+    return len(values) + 1 if values else 1  # Return next row
 
-# Background worker
-def process_queue():
-    while True:
-        try:
-            data, action = order_queue.get()
-            logger.info(f"Processing order: {data.get('order_number')}")
-
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    if action == "add_new_orders":
-                        add_new_orders(data)
-                    elif action == "add_backup_shipping_note":
-                        add_backup_shipping_note(data)
-                    elif action == "remove_fulfilled_sku":
-                        remove_fulfilled_sku(data)
-
-                    queued_orders.remove((data, action))
-                    logger.info(f"Successfully processed and removed: {data.get('order_number')}")
-                    break
-                except HttpError as e:
-                    if attempt < max_retries - 1:
-                        logger.warning(f"API error for {data.get('order_number')}, attempt {attempt + 1}/{max_retries}: {str(e)}. Retrying in 5 seconds...")
-                        time.sleep(5)
-                    else:
-                        logger.error(f"Failed after {max_retries} attempts: {str(e)}")
-                        break
-                except Exception as e:
-                    logger.error(f"Error processing {data.get('order_number')}: {str(e)}")
-                    break
-
-            order_queue.task_done()
-            time.sleep(1)  # 1-second delay between orders
-
-        except Exception as e:
-            logger.error(f"Queue processing error: {str(e)}")
-            order_queue.task_done()
-
-# Start worker
-worker_thread = threading.Thread(target=process_queue, daemon=True)
-worker_thread.start()
-
-# Webhook route
+# Flow
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     if not service:
@@ -122,45 +72,27 @@ def handle_webhook():
         return jsonify({"error": "Access Denied"}), 403
 
     try:
-        data = request.get_json(silent=True)
-        if data is None:
-            logger.error("Invalid JSON received")
-            return jsonify({"error": "Invalid JSON data provided"}), 400
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
 
-        if not isinstance(data, dict) or not data:
-            logger.error("Empty or invalid data")
-            return jsonify({"error": "No valid data provided"}), 400
-
-        logger.info(f"Received data: {data}")
         action = request.args.get('action', '')
-
         if data.get("backup_shipping_note"):
-            order_queue.put((data, "add_backup_shipping_note"))
-            queued_orders.append((data, "add_backup_shipping_note"))
-            logger.info(f"Queued backup shipping note: {data.get('order_number')}")
-            return jsonify({"status": "queued", "message": "Backup shipping note queued"}), 202
+            return add_backup_shipping_note(data)
         elif action == 'addNewOrders':
-            order_queue.put((data, "add_new_orders"))
-            queued_orders.append((data, "add_new_orders"))
-            logger.info(f"Queued new order: {data.get('order_number')}")
-            return jsonify({"status": "queued", "message": "Order queued"}), 202
+            return add_new_orders(data)
         elif action == 'removeFulfilledSKU':
-            order_queue.put((data, "remove_fulfilled_sku"))
-            queued_orders.append((data, "remove_fulfilled_sku"))
-            logger.info(f"Queued SKU removal: {data.get('order_number')}")
-            return jsonify({"status": "queued", "message": "SKU removal queued"}), 202
+            return remove_fulfilled_sku(data)
         else:
-            logger.error(f"No valid action: {action}")
             return jsonify({"error": "No valid action or backup note provided"}), 400
 
     except Exception as e:
-        logger.error(f"Error in webhook: {str(e)}")
+        logger.error(f"Error processing request: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# Sheet functions (from old code)
 def add_new_orders(data):
     order_number = data.get("order_number")
-    order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
+    order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
     order_country = data.get("order_country")
     order_created = format_date(data.get("order_created"))
     line_items = data.get("line_items", [])
@@ -183,9 +115,11 @@ def add_new_orders(data):
     delete_rows()
     delete_duplicate_rows()
 
+    return jsonify({"status": "success", "message": "Data successfully written to the sheet"}), 200
+
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
-    order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
+    order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
     order_country = data.get("order_country")
     backup_note = data.get("backup_shipping_note")
     order_created = format_date(data.get("order_created"))
@@ -208,6 +142,8 @@ def add_backup_shipping_note(data):
     apply_formulas()
     delete_rows()
     delete_duplicate_rows()
+
+    return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
 
 def remove_fulfilled_sku(data):
     order_number = data.get("order_number")
@@ -235,6 +171,8 @@ def remove_fulfilled_sku(data):
                     valueInputOption='RAW', body={'values': [values[i]]}
                 ).execute()
             break
+
+    return jsonify({"status": "success", "message": "Fulfilled SKUs removed"}), 200
 
 def apply_formulas():
     result = service.spreadsheets().values().get(
@@ -293,30 +231,6 @@ def delete_duplicate_rows():
         service.spreadsheets().values().clear(
             spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
-
-# Queue viewer
-@app.route('/orders/queued', methods=['GET'])
-def get_queued_orders():
-    provided_key = request.args.get('key')
-    if provided_key != SECRET_KEY:
-        return jsonify({"error": "Access Denied"}), 403
-
-    queued_list = [
-        {
-            "order_number": order_data.get("order_number"),
-            "action": action,
-            "order_created": order_data.get("order_created"),
-            "line_items": order_data.get("line_items", []),
-            "backup_shipping_note": order_data.get("backup_shipping_note", None)
-        }
-        for order_data, action in queued_orders
-    ]
-
-    return jsonify({
-        "status": "success",
-        "queued_orders": queued_list,
-        "queue_size": len(queued_list)
-    }), 200
 
 @app.route('/', methods=['GET'])
 def health_check():
