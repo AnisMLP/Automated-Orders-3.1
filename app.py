@@ -4,6 +4,11 @@ from datetime import datetime
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 import os
+import json
+from dotenv import load_dotenv
+
+# Load .env file for local testing
+load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -14,15 +19,23 @@ logger = logging.getLogger(__name__)
 
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0'  # Replace with your Google Sheet ID
+SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0'
 SHEET_NAME = 'Orders 3.1'
 RANGE_NAME = f'{SHEET_NAME}!A1'
 
-# Load credentials and secret key from environment or file
-SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')  # Set in Render env vars
+# Load credentials and secret key from environment
+SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
+GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
+
 try:
-    creds = service_account.Credentials.from_service_account_file(
-        'credentials.json', scopes=SCOPES)
+    if GOOGLE_CREDENTIALS:
+        # Load credentials from environment variable (Render)
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(GOOGLE_CREDENTIALS), scopes=SCOPES)
+    else:
+        # Fallback to file for local testing
+        creds = service_account.Credentials.from_service_account_file(
+            'credentials.json', scopes=SCOPES)
     service = build('sheets', 'v4', credentials=creds)
 except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
@@ -114,7 +127,7 @@ def add_backup_shipping_note(data):
         for vendor, skus in sku_by_vendor.items()
     ]
 
-    # Ensure 11 columns exist (A to K), then append
+    # Append to sheet (11 columns, A:K)
     body = {'values': rows_data}
     result = service.spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A1:K',
@@ -144,7 +157,7 @@ def remove_fulfilled_sku(data):
                 if item['sku'] in skus:
                     skus.remove(item['sku'])
             if not skus:
-                # Delete row by clearing it (API doesn't support direct row deletion)
+                # Clear row if no SKUs left (API can't delete rows directly)
                 service.spreadsheets().values().clear(
                     spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:K{i+1}'
                 ).execute()
@@ -187,7 +200,7 @@ def delete_rows():
     rows_to_clear = []
 
     for i, row in enumerate(values):
-        sku_cell = row[3] if len(row) > 3 else ''
+        sku_cell = row[3] if len(row) > 3 else ''  # Column D (index 3)
         if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
             rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:K{i+1}')
 
@@ -205,7 +218,7 @@ def delete_duplicate_rows():
     rows_to_clear = []
 
     for i, row in enumerate(values):
-        row_str = ','.join(row)
+        row_str = ','.join(map(str, row))  # Convert all elements to string
         if row_str in unique_rows:
             rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:K{i+1}')
         else:
