@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0'
+SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0' # PSA: Change needed
 SHEET_NAME = 'Orders 3.1'
 RANGE_NAME = f'{SHEET_NAME}!A1'
 SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
