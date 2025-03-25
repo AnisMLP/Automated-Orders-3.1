@@ -7,13 +7,8 @@ import os
 import json
 from dotenv import load_dotenv
 
-# Load .env file for local testing
 load_dotenv()
-
-# Initialize Flask app
 app = Flask(__name__)
-
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,13 +16,9 @@ logger = logging.getLogger(__name__)
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0'
 SHEET_NAME = 'Orders 3.1'
-RANGE_NAME = f'{SHEET_NAME}!A1'  # Still used as a base, but we'll adjust dynamically
-
-# Load credentials and secret key from environment
+RANGE_NAME = f'{SHEET_NAME}!A1'
 SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
-
-# Check if running on Render
 IS_RENDER = os.getenv('RENDER') == 'true'
 
 try:
@@ -47,12 +38,11 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-# Helper function to format date
 def format_date(date_str):
     date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
     return f"{date.year}-{str(date.month).zfill(2)}-{str(date.day).zfill(2)}"
 
-# Helper function to group SKUs by vendor
+
 def group_skus_by_vendor(line_items):
     sku_by_vendor = {}
     for item in line_items:
@@ -63,15 +53,15 @@ def group_skus_by_vendor(line_items):
             sku_by_vendor[vendor].append(sku)
     return sku_by_vendor
 
-# Helper function to get the last row
+
 def get_last_row():
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
     ).execute()
     values = result.get('values', [])
-    return len(values) + 1 if values else 1  # Return next row (1 if empty)
+    return len(values) + 1 if values else 1  # Return next row
 
-# Route to handle incoming POST requests from Flow
+# Flow
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     if not service:
@@ -113,7 +103,6 @@ def add_new_orders(data):
         for vendor, skus in sku_by_vendor.items()
     ]
 
-    # Get the next available row and write there
     start_row = get_last_row()
     range_to_write = f'{SHEET_NAME}!A{start_row}'
     body = {'values': rows_data}
@@ -142,7 +131,6 @@ def add_backup_shipping_note(data):
         for vendor, skus in sku_by_vendor.items()
     ]
 
-    # Get the next available row and write there
     start_row = get_last_row()
     range_to_write = f'{SHEET_NAME}!A{start_row}:K{start_row + len(rows_data) - 1}'
     body = {'values': rows_data}
