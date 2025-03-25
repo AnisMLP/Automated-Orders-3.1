@@ -78,7 +78,7 @@ def process_queue():
             order_data, action = order_queue.get()
             logger.info(f"Processing order: {order_data.get('order_number')}")
 
-            max_retries = 5  # Retry up to 5 times
+            max_retries = 5
             for attempt in range(max_retries):
                 try:
                     if action == "add_new_orders":
@@ -88,29 +88,27 @@ def process_queue():
                     elif action == "remove_fulfilled_sku":
                         remove_fulfilled_sku(order_data)
 
-                    # If we get here, it succeeded—remove from queued_orders
                     queued_orders.remove((order_data, action))
                     logger.info(f"Successfully processed and removed order: {order_data.get('order_number')}")
-                    break  # Exit retry loop on success
+                    break
 
                 except HttpError as e:
-                    if attempt < max_retries - 1:  # Not the last attempt
+                    if attempt < max_retries - 1:
                         logger.warning(f"API error for {order_data.get('order_number')}, attempt {attempt + 1}/{max_retries}: {str(e)}. Retrying in 5 seconds...")
-                        time.sleep(5)  # Wait longer before retrying
+                        time.sleep(5)
                     else:
                         logger.error(f"Failed to process {order_data.get('order_number')} after {max_retries} attempts: {str(e)}")
-                        # Keep it in queued_orders, but mark task done to avoid blocking
                         break
                 except Exception as e:
                     logger.error(f"Unexpected error for {order_data.get('order_number')}: {str(e)}")
-                    break  # Non-API error, give up
+                    break
 
             order_queue.task_done()
-            time.sleep(1)  # Delay between orders
+            time.sleep(1)
 
         except Exception as e:
             logger.error(f"Error processing queue item: {str(e)}")
-            order_queue.task_done()  # Avoid blocking the queue
+            order_queue.task_done()
 
 # Start the background worker thread
 worker_thread = threading.Thread(target=process_queue, daemon=True)
@@ -175,9 +173,20 @@ def handle_webhook():
         return jsonify({"error": "Access Denied"}), 403
 
     try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
+        # Log the raw request data for debugging
+        raw_data = request.get_data(as_text=True)
+        logger.info(f"Raw request data: {raw_data}")
+
+        data = request.get_json(silent=True)  # Don't fail on bad JSON yet
+        if data is None:
+            logger.error("Failed to parse JSON from request")
+            return jsonify({"error": "Invalid JSON data provided"}), 400
+
+        logger.info(f"Parsed JSON data: {data}")
+
+        if not isinstance(data, dict) or not data:
+            logger.error("Request data is empty or not a dictionary")
+            return jsonify({"error": "No valid data provided"}), 400
 
         action = request.args.get('action', '')
         if data.get("backup_shipping_note"):
@@ -196,6 +205,7 @@ def handle_webhook():
             logger.info(f"Queued SKU removal for order: {data.get('order_number')}")
             return jsonify({"status": "queued", "message": "SKU removal queued for processing"}), 202
         else:
+            logger.error(f"No valid action or backup note: action={action}, data={data}")
             return jsonify({"error": "No valid action or backup note provided"}), 400
 
     except Exception as e:
