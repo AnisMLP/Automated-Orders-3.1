@@ -6,6 +6,8 @@ from google.oauth2 import service_account
 import os
 import json
 from dotenv import load_dotenv
+import time
+from threading import Thread
 
 load_dotenv()
 app = Flask(__name__)
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0' # PSA: Change needed
+SPREADSHEET_ID = '1LIU3utVTmAgy9KXm1D9XcM2YiNKq3d7eJDSYWK-SpF0'  # PSA: Change needed
 SHEET_NAME = 'Orders 3.1'
 RANGE_NAME = f'{SHEET_NAME}!A1'
 SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
@@ -38,10 +40,12 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
+# Queue to store incoming orders
+order_queue = []
+
 def format_date(date_str):
     date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
     return f"{date.year}-{str(date.month).zfill(2)}-{str(date.day).zfill(2)}"
-
 
 def group_skus_by_vendor(line_items):
     sku_by_vendor = {}
@@ -53,44 +57,15 @@ def group_skus_by_vendor(line_items):
             sku_by_vendor[vendor].append(sku)
     return sku_by_vendor
 
-
 def get_last_row():
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
     ).execute()
     values = result.get('values', [])
-    return len(values) + 1 if values else 1  # Return next row
+    return len(values) + 1 if values else 1
 
-# Flow
-@app.route('/webhook', methods=['POST'])
-def handle_webhook():
-    if not service:
-        return jsonify({"error": "Google Sheets API not initialized"}), 500
-
-    provided_key = request.args.get('key')
-    if provided_key != SECRET_KEY:
-        return jsonify({"error": "Access Denied"}), 403
-
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-
-        action = request.args.get('action', '')
-        if data.get("backup_shipping_note"):
-            return add_backup_shipping_note(data)
-        elif action == 'addNewOrders':
-            return add_new_orders(data)
-        elif action == 'removeFulfilledSKU':
-            return remove_fulfilled_sku(data)
-        else:
-            return jsonify({"error": "No valid action or backup note provided"}), 400
-
-    except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-def add_new_orders(data):
+def process_order(data):
+    """Process a single order and write it to Google Sheets."""
     order_number = data.get("order_number")
     order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
     order_country = data.get("order_country")
@@ -115,7 +90,72 @@ def add_new_orders(data):
     delete_rows()
     delete_duplicate_rows()
 
-    return jsonify({"status": "success", "message": "Data successfully written to the sheet"}), 200
+    # Remove the processed order from the queue
+    global order_queue
+    order_queue = [order for order in order_queue if order.get("order_number") != order_number]
+    logger.info(f"Processed order {order_number}. Remaining orders in queue: {len(order_queue)}")
+
+def process_queue():
+    """Background thread to process orders one by one with a delay."""
+    while True:
+        global order_queue
+        if order_queue:
+            order = order_queue[0]  # Take the first order in the queue
+            try:
+                process_order(order)
+                time.sleep(2)  # Add a 2-second delay between processing orders
+            except Exception as e:
+                logger.error(f"Error processing order {order.get('order_number')}: {str(e)}")
+        else:
+            time.sleep(1)  # Sleep briefly if queue is empty
+
+# Start the queue processing thread
+queue_thread = Thread(target=process_queue, daemon=True)
+queue_thread.start()
+
+@app.route('/webhook', methods=['POST'])
+def handle_webhook():
+    if not service:
+        return jsonify({"error": "Google Sheets API not initialized"}), 500
+
+    provided_key = request.args.get('key')
+    if provided_key != SECRET_KEY:
+        return jsonify({"error": "Access Denied"}), 403
+
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        action = request.args.get('action', '')
+        if data.get("backup_shipping_note"):
+            return add_backup_shipping_note(data)
+        elif action == 'addNewOrders':
+            global order_queue
+            order_queue.append(data)
+            logger.info(f"Order {data.get('order_number')} added to queue. Queue size: {len(order_queue)}")
+            return jsonify({"status": "queued", "message": "Order added to processing queue"}), 200
+        elif action == 'removeFulfilledSKU':
+            return remove_fulfilled_sku(data)
+        else:
+            return jsonify({"error": "No valid action or backup note provided"}), 400
+
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+# New endpoint to view the order queue
+@app.route('/queue', methods=['GET'])
+def view_queue():
+    provided_key = request.args.get('key')
+    if provided_key != SECRET_KEY:
+        return jsonify({"error": "Access Denied"}), 403
+
+    global order_queue
+    return jsonify({
+        "queue_size": len(order_queue),
+        "orders": order_queue
+    }), 200
 
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
