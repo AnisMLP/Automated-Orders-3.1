@@ -44,7 +44,7 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-logger.info("App started with trailing comma fix v1.5 + reset")
+logger.info("App started with trailing comma fix v1.6 + debug")
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
@@ -59,7 +59,10 @@ def load_queue():
     try:
         if os.path.exists(QUEUE_FILE):
             with open(QUEUE_FILE, 'r') as f:
-                return json.load(f)
+                queue = json.load(f)
+                logger.info(f"Loaded queue from {QUEUE_FILE}. Size: {len(queue)}")
+                return queue
+        logger.info(f"No queue file at {QUEUE_FILE}, returning empty list")
         return []
     except Exception as e:
         logger.error(f"Error loading queue: {str(e)}")
@@ -70,7 +73,7 @@ def save_queue(queue):
     try:
         with open(QUEUE_FILE, 'w') as f:
             json.dump(queue, f)
-        logger.info(f"Queue saved successfully. New size: {len(queue)}")
+        logger.info(f"Queue saved successfully to {QUEUE_FILE}. New size: {len(queue)}")
     except Exception as e:
         logger.error(f"Error saving queue: {str(e)}")
 
@@ -170,7 +173,9 @@ def process_order(data):
 
 def process_queue():
     """Process one order from the queue with a delay."""
+    logger.info("Entering process_queue")
     queue = load_queue()
+    logger.info(f"Queue size after load: {len(queue)}")
     if queue:
         order = queue.pop(0)
         order_number = order.get('order_number', 'Unknown')
@@ -184,6 +189,8 @@ def process_queue():
             save_queue(queue)
         logger.info(f"Waiting 2 seconds before next process")
         time.sleep(2)
+    else:
+        logger.info("Queue is empty, nothing to process")
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -236,11 +243,14 @@ def handle_webhook():
 
 @app.route('/process', methods=['GET'])
 def process_endpoint():
+    logger.info("Received request to /process")
     provided_key = request.args.get('key')
     if provided_key != SECRET_KEY:
+        logger.error(f"Access denied: Invalid key - {provided_key}")
         return jsonify({"error": "Access Denied"}), 403
     process_queue()
     queue = load_queue()
+    logger.info(f"Process endpoint completed. Queue size: {len(queue)}")
     return jsonify({"status": "processed", "queue_size": len(queue)}), 200
 
 @app.route('/queue', methods=['GET'])
