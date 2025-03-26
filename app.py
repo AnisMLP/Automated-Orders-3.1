@@ -65,49 +65,50 @@ def get_last_row():
     return len(values) + 1 if values else 1
 
 def process_order(data):
-    """Process a single order and write it to Google Sheets."""
-    order_number = data.get("order_number")
-    order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
-    order_country = data.get("order_country")
-    order_created = format_date(data.get("order_created"))
-    line_items = data.get("line_items", [])
+    """Process a single order from the queue (same as original add_new_orders)."""
+    try:
+        order_number = data.get("order_number")
+        order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
+        order_country = data.get("order_country")
+        order_created = format_date(data.get("order_created"))
+        line_items = data.get("line_items", [])
 
-    sku_by_vendor = group_skus_by_vendor(line_items)
-    rows_data = [
-        [order_created, order_number, order_id, ', '.join(skus), vendor, order_country]
-        for vendor, skus in sku_by_vendor.items()
-    ]
+        sku_by_vendor = group_skus_by_vendor(line_items)
+        rows_data = [
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country]
+            for vendor, skus in sku_by_vendor.items()
+        ]
 
-    start_row = get_last_row()
-    range_to_write = f'{SHEET_NAME}!A{start_row}'
-    body = {'values': rows_data}
-    result = service.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID, range=range_to_write,
-        valueInputOption='RAW', body=body
-    ).execute()
+        start_row = get_last_row()
+        range_to_write = f'{SHEET_NAME}!A{start_row}'
+        body = {'values': rows_data}
+        result = service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID, range=range_to_write,
+            valueInputOption='RAW', body=body
+        ).execute()
 
-    apply_formulas()
-    delete_rows()
-    delete_duplicate_rows()
+        apply_formulas()
+        delete_rows()
+        delete_duplicate_rows()
 
-    # Remove the processed order from the queue
-    global order_queue
-    order_queue = [order for order in order_queue if order.get("order_number") != order_number]
-    logger.info(f"Processed order {order_number}. Remaining orders in queue: {len(order_queue)}")
+        # Remove processed order from queue
+        global order_queue
+        order_queue = [order for order in order_queue if order.get("order_number") != order_number]
+        logger.info(f"Processed order {order_number}. Queue size: {len(order_queue)}")
+    except Exception as e:
+        logger.error(f"Error processing order {data.get('order_number', 'Unknown')}: {str(e)}")
 
 def process_queue():
-    """Background thread to process orders one by one with a delay."""
+    """Background thread to process orders one by one."""
+    logger.info("Starting queue processing thread")
     while True:
         global order_queue
         if order_queue:
-            order = order_queue[0]  # Take the first order in the queue
-            try:
-                process_order(order)
-                time.sleep(2)  # Add a 2-second delay between processing orders
-            except Exception as e:
-                logger.error(f"Error processing order {order.get('order_number')}: {str(e)}")
+            order = order_queue[0]  # Take first order
+            process_order(order)
+            time.sleep(2)  # Delay to prevent Google Sheets overload
         else:
-            time.sleep(1)  # Sleep briefly if queue is empty
+            time.sleep(1)  # Wait if queue is empty
 
 # Start the queue processing thread
 queue_thread = Thread(target=process_queue, daemon=True)
@@ -131,6 +132,7 @@ def handle_webhook():
         if data.get("backup_shipping_note"):
             return add_backup_shipping_note(data)
         elif action == 'addNewOrders':
+            # Add to queue instead of processing immediately
             global order_queue
             order_queue.append(data)
             logger.info(f"Order {data.get('order_number')} added to queue. Queue size: {len(order_queue)}")
@@ -139,23 +141,9 @@ def handle_webhook():
             return remove_fulfilled_sku(data)
         else:
             return jsonify({"error": "No valid action or backup note provided"}), 400
-
     except Exception as e:
         logger.error(f"Error processing request: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-# New endpoint to view the order queue
-@app.route('/queue', methods=['GET'])
-def view_queue():
-    provided_key = request.args.get('key')
-    if provided_key != SECRET_KEY:
-        return jsonify({"error": "Access Denied"}), 403
-
-    global order_queue
-    return jsonify({
-        "queue_size": len(order_queue),
-        "orders": order_queue
-    }), 200
 
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
