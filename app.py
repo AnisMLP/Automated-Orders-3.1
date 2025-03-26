@@ -151,17 +151,24 @@ def handle_webhook():
     if provided_key != SECRET_KEY:
         return jsonify({"error": "Access Denied"}), 403
 
+    # Log raw request data for debugging
+    logger.info(f"Raw request data: {request.data}")
+    logger.info(f"Request headers: {request.headers}")
+
+    queue = load_queue()
     try:
-        data = request.get_json()
+        # Force JSON parsing and handle invalid JSON explicitly
+        data = request.get_json(force=True)
         if not data:
-            logger.error("No data provided in webhook request")
-            return jsonify({"error": "No data provided"}), 400
+            logger.error("No valid JSON data provided in webhook request")
+            queue.append({"error": "No valid JSON data", "raw_data": request.data.decode('utf-8')})
+            save_queue(queue)
+            return jsonify({"error": "No valid JSON data provided"}), 400
 
         action = request.args.get('action', '')
         if data.get("backup_shipping_note"):
             return add_backup_shipping_note(data)
         elif action == 'addNewOrders':
-            queue = load_queue()
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {data.get('order_number', 'Unknown')} added to queue. Queue size: {len(queue)}")
@@ -172,8 +179,15 @@ def handle_webhook():
         else:
             logger.error(f"Invalid action: {action}")
             return jsonify({"error": "No valid action or backup note provided"}), 400
+    except ValueError as e:
+        logger.error(f"Invalid JSON received: {str(e)}")
+        queue.append({"error": f"Invalid JSON: {str(e)}", "raw_data": request.data.decode('utf-8')})
+        save_queue(queue)
+        return jsonify({"error": "Invalid JSON format"}), 400
     except Exception as e:
         logger.error(f"Error processing webhook request: {str(e)}")
+        queue.append({"error": str(e), "raw_data": request.data.decode('utf-8')})
+        save_queue(queue)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/queue', methods=['GET'])
