@@ -43,7 +43,7 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-logger.info("App started with queue-only write v1.3")
+logger.info("App started with bad request fix v1.4")
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
@@ -189,11 +189,17 @@ def handle_webhook():
         logger.error(f"Access denied: Invalid key - {provided_key}")
         return jsonify({"error": "Access Denied"}), 403
 
+    # Log raw request body for debugging
+    raw_body = request.get_data(as_text=True)
+    logger.info(f"Raw webhook request body: {raw_body}")
+
     try:
-        data = request.get_json()
-        logger.info(f"Received webhook data: {json.dumps(data)}")
+        data = request.get_json(silent=True)  # Don't raise exception on bad JSON
+        if data is None:
+            logger.error(f"Failed to parse JSON: {raw_body}")
+            return jsonify({"error": "Invalid JSON payload"}), 400
         if not data or 'order_number' not in data:
-            logger.error("Invalid or no data provided in webhook request")
+            logger.error(f"Missing order_number or empty data: {raw_body}")
             return jsonify({"error": "Invalid or no data provided"}), 400
 
         action = request.args.get('action', '')
@@ -217,12 +223,11 @@ def handle_webhook():
             logger.error(f"Invalid action for order {order_number}: {action}")
             return jsonify({"error": "No valid action or backup note provided"}), 400
     except Exception as e:
-        logger.error(f"Error processing webhook request: {str(e)}")
+        logger.error(f"Unexpected error processing webhook request: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/process', methods=['GET'])
 def process_endpoint():
-    """Manually process one order from the queue."""
     provided_key = request.args.get('key')
     if provided_key != SECRET_KEY:
         return jsonify({"error": "Access Denied"}), 403
