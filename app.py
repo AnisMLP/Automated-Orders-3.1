@@ -6,13 +6,11 @@ from google.oauth2 import service_account
 import os
 import json
 from dotenv import load_dotenv
-import re
 import time
-import threading
 
 load_dotenv()
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Google Sheets setup
@@ -40,15 +38,8 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-logger.info("App started with auto-queue v2.5")
-
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
-
-def fix_trailing_commas(json_str):
-    """Remove trailing commas from JSON arrays."""
-    fixed_str = re.sub(r',(\s*[\]}])', r'\1', json_str)
-    return fixed_str
 
 def load_queue():
     """Load the queue from file."""
@@ -56,7 +47,6 @@ def load_queue():
         if os.path.exists(QUEUE_FILE):
             with open(QUEUE_FILE, 'r') as f:
                 return json.load(f)
-        logger.info(f"No queue file found at {QUEUE_FILE}, starting empty")
         return []
     except Exception as e:
         logger.error(f"Error loading queue: {str(e)}")
@@ -67,7 +57,6 @@ def save_queue(queue):
     try:
         with open(QUEUE_FILE, 'w') as f:
             json.dump(queue, f)
-        logger.info(f"Queue saved successfully. Size: {len(queue)}")
     except Exception as e:
         logger.error(f"Error saving queue: {str(e)}")
 
@@ -103,23 +92,6 @@ def get_last_row():
         logger.error(f"Error getting last row: {str(e)}")
         return 1
 
-def order_exists_in_sheet(order_number):
-    """Check if order is already in Google Sheets."""
-    if not service:
-        return False
-    try:
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!B:B'
-        ).execute()
-        values = result.get('values', [])
-        for row in values:
-            if row and row[0] == order_number:
-                return True
-        return False
-    except Exception as e:
-        logger.error(f"Error checking if order {order_number} exists: {str(e)}")
-        return False
-
 def process_order(data):
     """Process a single order and write to Google Sheets."""
     if not service:
@@ -127,16 +99,11 @@ def process_order(data):
         return False
     try:
         order_number = data.get("order_number", "Unknown")
-        if order_exists_in_sheet(order_number):
-            logger.info(f"Order {order_number} already in Google Sheets, skipping")
-            return True
-
         order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
         order_country = data.get("order_country", "Unknown")
         order_created = format_date(data.get("order_created", ""))
         line_items = data.get("line_items", [])
 
-        logger.info(f"Preparing order {order_number} for processing")
         sku_by_vendor = group_skus_by_vendor(line_items)
         rows_data = [
             [order_created, order_number, order_id, ', '.join(skus), vendor, order_country]
@@ -152,11 +119,8 @@ def process_order(data):
             valueInputOption='RAW', body=body
         ).execute()
 
-        logger.info(f"Order {order_number} written to Google Sheets, applying formulas")
         apply_formulas()
-        logger.info(f"Formulas applied for order {order_number}, deleting rows")
         delete_rows()
-        logger.info(f"Rows deleted for order {order_number}, deleting duplicates")
         delete_duplicate_rows()
 
         logger.info(f"Successfully processed order {order_number}")
@@ -169,16 +133,14 @@ def process_queue():
     """Process one order from the queue with a delay."""
     queue = load_queue()
     if queue:
-        order = queue.pop(0)
-        order_number = order.get('order_number', 'Unknown')
-        logger.info(f"Starting to process order {order_number} from queue")
+        order = queue.pop(0)  # Take the first order
         if process_order(order):
-            save_queue(queue)
-            logger.info(f"Order {order_number} removed from queue. Queue size now: {len(queue)}")
+            save_queue(queue)  # Save the updated queue
+            logger.info(f"Queue size after processing: {len(queue)}")
         else:
-            logger.warning(f"Failed to process order {order_number}, keeping in queue")
-            queue.insert(0, order)
+            queue.insert(0, order)  # Put it back if failed
             save_queue(queue)
+        time.sleep(2)  # Delay to keep Google Sheets happy
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -187,67 +149,41 @@ def handle_webhook():
 
     provided_key = request.args.get('key')
     if provided_key != SECRET_KEY:
-        logger.error(f"Access denied: Invalid key - {provided_key}")
         return jsonify({"error": "Access Denied"}), 403
 
-    raw_body = request.get_data(as_text=True)
-    logger.info(f"Raw webhook request body: {raw_body}")
-    fixed_body = fix_trailing_commas(raw_body)
-    if raw_body != fixed_body:
-        logger.info(f"Fixed trailing commas in JSON: {fixed_body}")
-
     try:
-        data = json.loads(fixed_body)
-        if not data or 'order_number' not in data:
-            logger.error(f"Missing order_number or empty data: {fixed_body}")
-            return jsonify({"error": "Invalid or no data provided"}), 400
+        data = request.get_json()
+        if not data:
+            logger.error("No data provided in webhook request")
+            return jsonify({"error": "No data provided"}), 400
 
         action = request.args.get('action', '')
-        order_number = data.get('order_number', 'Unknown')
-        logger.info(f"Processing webhook for order {order_number} with action {action}")
-
         if data.get("backup_shipping_note"):
             return add_backup_shipping_note(data)
         elif action == 'addNewOrders':
             queue = load_queue()
-            if any(o.get('order_number') == order_number for o in queue) or order_exists_in_sheet(order_number):
-                logger.info(f"Order {order_number} already in queue or Google Sheets, skipping")
-                return jsonify({"status": "skipped", "message": "Order already processed or queued"}), 200
             queue.append(data)
             save_queue(queue)
-            logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
+            logger.info(f"Order {data.get('order_number', 'Unknown')} added to queue. Queue size: {len(queue)}")
+            process_queue()  # Process one order immediately after adding
             return jsonify({"status": "queued", "message": "Order added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
         else:
-            logger.error(f"Invalid action for order {order_number}: {action}")
+            logger.error(f"Invalid action: {action}")
             return jsonify({"error": "No valid action or backup note provided"}), 400
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON: {fixed_body}. Error: {str(e)}")
-        return jsonify({"error": "Invalid JSON payload"}), 400
     except Exception as e:
-        logger.error(f"Unexpected error processing webhook request: {str(e)}")
+        logger.error(f"Error processing webhook request: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/queue', methods=['GET'])
 def view_queue():
     provided_key = request.args.get('key')
     if provided_key != SECRET_KEY:
-        logger.error(f"Access denied: Invalid key - {provided_key}")
         return jsonify({"error": "Access Denied"}), 403
     queue = load_queue()
     logger.info(f"Queue accessed. Size: {len(queue)}")
     return jsonify({"queue_size": len(queue), "orders": queue}), 200
-
-@app.route('/reset-queue', methods=['GET'])
-def reset_queue():
-    provided_key = request.args.get('key')
-    if provided_key != SECRET_KEY:
-        logger.error(f"Access denied: Invalid key - {provided_key}")
-        return jsonify({"error": "Access Denied"}), 403
-    save_queue([])
-    logger.info("Queue reset to empty")
-    return jsonify({"status": "reset", "queue_size": 0}), 200
 
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
@@ -364,16 +300,9 @@ def delete_duplicate_rows():
             spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
-def background_processor():
-    """Run in background to process queue every 5 seconds."""
-    while True:
-        process_queue()
-        time.sleep(5)  # Delay between processing each order
-
 @app.route('/', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == '__main__':
-    threading.Thread(target=background_processor, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=True)
