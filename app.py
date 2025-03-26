@@ -156,39 +156,43 @@ def handle_webhook():
     logger.info(f"Request headers: {request.headers}")
 
     queue = load_queue()
+    order_number = "Unknown"  # Default, will be updated if data is valid
     try:
         # Force JSON parsing and handle invalid JSON explicitly
         data = request.get_json(force=True)
         if not data:
             logger.error("No valid JSON data provided in webhook request")
-            queue.append({"error": "No valid JSON data", "raw_data": request.data.decode('utf-8')})
+            queue.append({"error": "No valid JSON data", "order_number": order_number, "raw_data": request.data.decode('utf-8')})
             save_queue(queue)
-            return jsonify({"error": "No valid JSON data provided"}), 400
+            return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
+        order_number = data.get("order_number", "Unknown")  # Update order_number if available
         action = request.args.get('action', '')
         if data.get("backup_shipping_note"):
             return add_backup_shipping_note(data)
         elif action == 'addNewOrders':
             queue.append(data)
             save_queue(queue)
-            logger.info(f"Order {data.get('order_number', 'Unknown')} added to queue. Queue size: {len(queue)}")
+            logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
             process_queue()  # Process one order immediately after adding
-            return jsonify({"status": "queued", "message": "Order added to queue"}), 200
+            return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
         else:
             logger.error(f"Invalid action: {action}")
-            return jsonify({"error": "No valid action or backup note provided"}), 400
+            queue.append({"error": f"Invalid action: {action}", "order_number": order_number, "raw_data": request.data.decode('utf-8')})
+            save_queue(queue)
+            return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid action"}), 200
     except ValueError as e:
         logger.error(f"Invalid JSON received: {str(e)}")
-        queue.append({"error": f"Invalid JSON: {str(e)}", "raw_data": request.data.decode('utf-8')})
+        queue.append({"error": f"Invalid JSON: {str(e)}", "order_number": order_number, "raw_data": request.data.decode('utf-8')})
         save_queue(queue)
-        return jsonify({"error": "Invalid JSON format"}), 400
+        return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid JSON"}), 200
     except Exception as e:
         logger.error(f"Error processing webhook request: {str(e)}")
-        queue.append({"error": str(e), "raw_data": request.data.decode('utf-8')})
+        queue.append({"error": str(e), "order_number": order_number, "raw_data": request.data.decode('utf-8')})
         save_queue(queue)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: {str(e)}"}), 200
 
 @app.route('/queue', methods=['GET'])
 def view_queue():
