@@ -99,10 +99,15 @@ def process_order(data):
         return False
     try:
         order_number = data.get("order_number", "Unknown")
+        logger.info(f"Processing order {order_number}")
         order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
         order_country = data.get("order_country", "Unknown")
         order_created = format_date(data.get("order_created", ""))
         line_items = data.get("line_items", [])
+
+        if not line_items:
+            logger.warning(f"Order {order_number} has no line items, skipping Google Sheets write")
+            return True  # Treat as success to remove from queue
 
         sku_by_vendor = group_skus_by_vendor(line_items)
         rows_data = [
@@ -123,24 +128,35 @@ def process_order(data):
         delete_rows()
         delete_duplicate_rows()
 
-        logger.info(f"Successfully processed order {order_number}")
+        logger.info(f"Successfully processed order {order_number} to Google Sheets")
         return True
     except Exception as e:
         logger.error(f"Error processing order {data.get('order_number', 'Unknown')}: {str(e)}")
         return False
 
 def process_queue():
-    """Process one order from the queue with a delay."""
+    """Process one order from the queue."""
     queue = load_queue()
-    if queue:
-        order = queue.pop(0)  # Take the first order
-        if process_order(order):
-            save_queue(queue)  # Save the updated queue
-            logger.info(f"Queue size after processing: {len(queue)}")
-        else:
-            queue.insert(0, order)  # Put it back if failed
-            save_queue(queue)
-        time.sleep(2)  # Delay to keep Google Sheets happy
+    if not queue:
+        logger.info("Queue is empty, nothing to process")
+        return
+    order = queue[0]  # Peek at the first order without removing it yet
+    order_number = order.get("order_number", "Unknown")
+    logger.info(f"Attempting to process queued order {order_number}")
+
+    # Check if it's an error entry (failed order), leave it in queue
+    if "error" in order:
+        logger.info(f"Order {order_number} has an error, leaving in queue: {order['error']}")
+        return
+
+    # Process valid order
+    if process_order(order):
+        queue.pop(0)  # Remove it only after successful processing
+        save_queue(queue)
+        logger.info(f"Order {order_number} processed successfully and removed from queue. Queue size: {len(queue)}")
+    else:
+        logger.warning(f"Order {order_number} failed processing, leaving in queue for inspection")
+    time.sleep(2)  # Delay to avoid Google Sheets rate limits
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -151,14 +167,12 @@ def handle_webhook():
     if provided_key != SECRET_KEY:
         return jsonify({"error": "Access Denied"}), 403
 
-    # Log raw request data for debugging
     logger.info(f"Raw request data: {request.data}")
     logger.info(f"Request headers: {request.headers}")
 
     queue = load_queue()
-    order_number = "Unknown"  # Default, will be updated if data is valid
+    order_number = "Unknown"
     try:
-        # Force JSON parsing and handle invalid JSON explicitly
         data = request.get_json(force=True)
         if not data:
             logger.error("No valid JSON data provided in webhook request")
@@ -166,7 +180,7 @@ def handle_webhook():
             save_queue(queue)
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
-        order_number = data.get("order_number", "Unknown")  # Update order_number if available
+        order_number = data.get("order_number", "Unknown")
         action = request.args.get('action', '')
         if data.get("backup_shipping_note"):
             return add_backup_shipping_note(data)
@@ -174,7 +188,7 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            process_queue()  # Process one order immediately after adding
+            process_queue()  # Process immediately if valid
             return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
