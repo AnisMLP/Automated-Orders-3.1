@@ -39,7 +39,7 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-logger.info("App started with trailing comma fix v2.2 + queue")
+logger.info("App started with trailing comma fix v2.3 + auto-queue")
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
@@ -179,9 +179,8 @@ def process_queue():
             queue.insert(0, order)
             save_queue(queue)
         logger.info("Waiting 5 seconds before next process to avoid Google Sheets overlap")
-        time.sleep(5)  # Increased delay to prevent gaps
+        time.sleep(5)  # Delay to prevent interference
 
-# Replace the /webhook route in v2.2 with this:
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     if not service:
@@ -218,7 +217,7 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            process_queue()  # Process immediately after queuing
+            process_queue()  # Auto-process one order after queuing
             return jsonify({"status": "queued", "message": "Order added to queue and processing started"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
@@ -231,17 +230,6 @@ def handle_webhook():
     except Exception as e:
         logger.error(f"Unexpected error processing webhook request: {str(e)}")
         return jsonify({"error": str(e)}), 500
-
-@app.route('/process', methods=['GET'])
-def process_endpoint():
-    provided_key = request.args.get('key')
-    if provided_key != SECRET_KEY:
-        logger.error(f"Access denied: Invalid key - {provided_key}")
-        return jsonify({"error": "Access Denied"}), 403
-    process_queue()
-    queue = load_queue()
-    logger.info(f"Process endpoint completed. Queue size: {len(queue)}")
-    return jsonify({"status": "processed", "queue_size": len(queue)}), 200
 
 @app.route('/queue', methods=['GET'])
 def view_queue():
