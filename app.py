@@ -181,6 +181,7 @@ def process_queue():
         logger.info("Waiting 5 seconds before next process to avoid Google Sheets overlap")
         time.sleep(5)  # Increased delay to prevent gaps
 
+# Replace the /webhook route in v2.2 with this:
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     if not service:
@@ -217,7 +218,8 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            return jsonify({"status": "queued", "message": "Order added to queue"}), 200
+            process_queue()  # Process immediately after queuing
+            return jsonify({"status": "queued", "message": "Order added to queue and processing started"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
         else:
