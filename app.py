@@ -10,7 +10,8 @@ import time
 
 load_dotenv()
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+# Enhanced logging setup for more detail
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Google Sheets setup
@@ -93,7 +94,6 @@ def get_last_row():
         return 1
 
 def process_order(data):
-    """Process a single order and write to Google Sheets."""
     if not service:
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
@@ -113,12 +113,13 @@ def process_order(data):
         start_row = get_last_row()
         range_to_write = f'{SHEET_NAME}!A{start_row}'
         body = {'values': rows_data}
-        logger.info(f"Writing order {order_number} to Google Sheets at {range_to_write}")
+        logger.info(f"Attempting to write order {order_number} to Google Sheets at {range_to_write}")
         result = service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID, range=range_to_write,
             valueInputOption='RAW', body=body
         ).execute()
 
+        logger.info(f"Order {order_number} written to Google Sheets, applying formulas")
         apply_formulas()
         delete_rows()
         delete_duplicate_rows()
@@ -133,14 +134,16 @@ def process_queue():
     """Process one order from the queue with a delay."""
     queue = load_queue()
     if queue:
-        order = queue.pop(0)  # Take the first order
+        order = queue.pop(0)
+        logger.info(f"Starting to process order {order.get('order_number', 'Unknown')} from queue")
         if process_order(order):
-            save_queue(queue)  # Save the updated queue
+            save_queue(queue)
             logger.info(f"Queue size after processing: {len(queue)}")
         else:
-            queue.insert(0, order)  # Put it back if failed
+            logger.warning(f"Failed to process order {order.get('order_number', 'Unknown')}, putting it back in queue")
+            queue.insert(0, order)
             save_queue(queue)
-        time.sleep(2)  # Delay to keep Google Sheets happy
+        time.sleep(2)
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -184,6 +187,15 @@ def view_queue():
     queue = load_queue()
     logger.info(f"Queue accessed. Size: {len(queue)}")
     return jsonify({"queue_size": len(queue), "orders": queue}), 200
+
+# Optional: Uncomment this for cron job to process queue automatically
+# @app.route('/process', methods=['GET'])
+# def manual_process():
+#     provided_key = request.args.get('key')
+#     if provided_key != SECRET_KEY:
+#         return jsonify({"error": "Access Denied"}), 403
+#     process_queue()
+#     return jsonify({"status": "processed", "message": "Processed one order from queue"}), 200
 
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
