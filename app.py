@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 import time
 import sys
+import re
 
 load_dotenv()
 app = Flask(__name__)
@@ -43,10 +44,16 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-logger.info("App started with bad request fix v1.4")
+logger.info("App started with trailing comma fix v1.5")
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
+
+def fix_trailing_commas(json_str):
+    """Remove trailing commas from JSON arrays."""
+    # Replace ], or }, followed by optional whitespace and closing bracket with just the closing bracket
+    fixed_str = re.sub(r',(\s*[\]}])', r'\1', json_str)
+    return fixed_str
 
 def load_queue():
     """Load the queue from file."""
@@ -189,17 +196,17 @@ def handle_webhook():
         logger.error(f"Access denied: Invalid key - {provided_key}")
         return jsonify({"error": "Access Denied"}), 403
 
-    # Log raw request body for debugging
+    # Get and fix raw request body
     raw_body = request.get_data(as_text=True)
     logger.info(f"Raw webhook request body: {raw_body}")
+    fixed_body = fix_trailing_commas(raw_body)
+    if raw_body != fixed_body:
+        logger.info(f"Fixed trailing commas in JSON: {fixed_body}")
 
     try:
-        data = request.get_json(silent=True)  # Don't raise exception on bad JSON
-        if data is None:
-            logger.error(f"Failed to parse JSON: {raw_body}")
-            return jsonify({"error": "Invalid JSON payload"}), 400
+        data = json.loads(fixed_body)
         if not data or 'order_number' not in data:
-            logger.error(f"Missing order_number or empty data: {raw_body}")
+            logger.error(f"Missing order_number or empty data: {fixed_body}")
             return jsonify({"error": "Invalid or no data provided"}), 400
 
         action = request.args.get('action', '')
@@ -222,6 +229,9 @@ def handle_webhook():
         else:
             logger.error(f"Invalid action for order {order_number}: {action}")
             return jsonify({"error": "No valid action or backup note provided"}), 400
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse fixed JSON: {fixed_body}. Error: {str(e)}")
+        return jsonify({"error": "Invalid JSON payload"}), 400
     except Exception as e:
         logger.error(f"Unexpected error processing webhook request: {str(e)}")
         return jsonify({"error": str(e)}), 500
