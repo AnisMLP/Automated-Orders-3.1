@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 import re
 import time
+import threading
 
 load_dotenv()
 app = Flask(__name__)
@@ -39,7 +40,7 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-logger.info("App started with trailing comma fix v2.3 + auto-queue")
+logger.info("App started with auto-queue v2.5")
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
@@ -178,8 +179,6 @@ def process_queue():
             logger.warning(f"Failed to process order {order_number}, keeping in queue")
             queue.insert(0, order)
             save_queue(queue)
-        logger.info("Waiting 5 seconds before next process to avoid Google Sheets overlap")
-        time.sleep(5)  # Delay to prevent interference
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -211,14 +210,13 @@ def handle_webhook():
             return add_backup_shipping_note(data)
         elif action == 'addNewOrders':
             queue = load_queue()
-            if any(o.get('order_number') == order_number for o in queue):
-                logger.info(f"Order {order_number} already in queue, skipping")
-                return jsonify({"status": "queued", "message": "Order already in queue"}), 200
+            if any(o.get('order_number') == order_number for o in queue) or order_exists_in_sheet(order_number):
+                logger.info(f"Order {order_number} already in queue or Google Sheets, skipping")
+                return jsonify({"status": "skipped", "message": "Order already processed or queued"}), 200
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            process_queue()  # Auto-process one order after queuing
-            return jsonify({"status": "queued", "message": "Order added to queue and processing started"}), 200
+            return jsonify({"status": "queued", "message": "Order added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
         else:
@@ -366,9 +364,16 @@ def delete_duplicate_rows():
             spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
+def background_processor():
+    """Run in background to process queue every 5 seconds."""
+    while True:
+        process_queue()
+        time.sleep(5)  # Delay between processing each order
+
 @app.route('/', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == '__main__':
+    threading.Thread(target=background_processor, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=True)
