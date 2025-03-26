@@ -44,14 +44,13 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-logger.info("App started with trailing comma fix v1.5")
+logger.info("App started with trailing comma fix v1.5 + reset")
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
 
 def fix_trailing_commas(json_str):
     """Remove trailing commas from JSON arrays."""
-    # Replace ], or }, followed by optional whitespace and closing bracket with just the closing bracket
     fixed_str = re.sub(r',(\s*[\]}])', r'\1', json_str)
     return fixed_str
 
@@ -196,7 +195,6 @@ def handle_webhook():
         logger.error(f"Access denied: Invalid key - {provided_key}")
         return jsonify({"error": "Access Denied"}), 403
 
-    # Get and fix raw request body
     raw_body = request.get_data(as_text=True)
     logger.info(f"Raw webhook request body: {raw_body}")
     fixed_body = fix_trailing_commas(raw_body)
@@ -253,6 +251,15 @@ def view_queue():
     queue = load_queue()
     logger.info(f"Queue accessed. Size: {len(queue)}")
     return jsonify({"queue_size": len(queue), "orders": queue}), 200
+
+@app.route('/reset-queue', methods=['GET'])
+def reset_queue():
+    provided_key = request.args.get('key')
+    if provided_key != SECRET_KEY:
+        return jsonify({"error": "Access Denied"}), 403
+    save_queue([])
+    logger.info("Queue reset to empty")
+    return jsonify({"status": "reset", "queue_size": 0}), 200
 
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
