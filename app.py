@@ -135,27 +135,33 @@ def process_order(data):
         return False
 
 def process_queue():
-    """Process one order from the queue."""
+    """Process all valid orders in the queue, skipping error entries."""
     queue = load_queue()
     if not queue:
         logger.info("Queue is empty, nothing to process")
         return
-    order = queue[0]  # Peek at the first order without removing it yet
-    order_number = order.get("order_number", "Unknown")
-    logger.info(f"Attempting to process queued order {order_number}")
 
-    # Check if it's an error entry (failed order), leave it in queue
-    if "error" in order:
-        logger.info(f"Order {order_number} has an error, leaving in queue: {order['error']}")
-        return
+    updated_queue = []  # New queue to keep unprocessed/error items
+    for order in queue:
+        order_number = order.get("order_number", "Unknown")
+        logger.info(f"Inspecting queued order {order_number}")
 
-    # Process valid order
-    if process_order(order):
-        queue.pop(0)  # Remove it only after successful processing
-        save_queue(queue)
-        logger.info(f"Order {order_number} processed successfully and removed from queue. Queue size: {len(queue)}")
-    else:
-        logger.warning(f"Order {order_number} failed processing, leaving in queue for inspection")
+        # Skip if it's an error entry
+        if "error" in order:
+            logger.info(f"Order {order_number} has an error, keeping in queue: {order['error']}")
+            updated_queue.append(order)
+            continue
+
+        # Process valid order
+        logger.info(f"Attempting to process valid order {order_number}")
+        if process_order(order):
+            logger.info(f"Order {order_number} processed successfully, removing from queue")
+        else:
+            logger.warning(f"Order {order_number} failed processing, keeping in queue for inspection")
+            updated_queue.append(order)
+
+    save_queue(updated_queue)
+    logger.info(f"Queue processing complete. New queue size: {len(updated_queue)}")
     time.sleep(2)  # Delay to avoid Google Sheets rate limits
 
 @app.route('/webhook', methods=['POST'])
@@ -188,7 +194,7 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            process_queue()  # Process immediately if valid
+            process_queue()  # Process immediately
             return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
