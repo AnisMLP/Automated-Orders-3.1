@@ -64,16 +64,14 @@ def save_queue(queue):
 def clean_json(raw_data):
     """Clean up common JSON syntax errors like trailing commas and empty lines."""
     try:
-        # Decode bytes to string if necessary
+        
         if isinstance(raw_data, bytes):
             raw_data = raw_data.decode('utf-8')
         
-        # Remove empty lines and normalize whitespace
         lines = [line.strip() for line in raw_data.splitlines() if line.strip()]
         cleaned = '\n'.join(lines)
         
-        # Fix trailing commas in arrays/objects
-        cleaned = re.sub(r',(\s*[\]}])', r'\1', cleaned)  # Remove comma before closing bracket
+        cleaned = re.sub(r',(\s*[\]}])', r'\1', cleaned) 
         return cleaned
     except Exception as e:
         logger.error(f"Error cleaning JSON: {str(e)}")
@@ -126,7 +124,7 @@ def process_order(data):
 
         if not line_items:
             logger.warning(f"Order {order_number} has no line items, skipping Google Sheets write")
-            return True  # Treat as success to remove from queue
+            return True 
 
         sku_by_vendor = group_skus_by_vendor(line_items)
         rows_data = [
