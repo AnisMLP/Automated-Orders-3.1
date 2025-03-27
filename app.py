@@ -98,7 +98,7 @@ def get_last_row():
         return 1
     try:
         result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M (13 columns)
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
         ).execute()
         values = result.get('values', [])
         return len(values) + 1 if values else 1
@@ -124,7 +124,6 @@ def process_order(data):
             return True
 
         sku_by_vendor = group_skus_by_vendor(line_items)
-        # New structure: Date, Order Number, URL, SKU, Brand, Country, Assign Type, Date Due, PIC, Status, PO Number, What's happening, Notes
         rows_data = [
             [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", ""]
             for vendor, skus in sku_by_vendor.items()
@@ -248,14 +247,13 @@ def add_backup_shipping_note(data):
     line_items = data.get("line_items", [])
 
     sku_by_vendor = group_skus_by_vendor(line_items)
-    # Updated to 13 columns
     rows_data = [
         [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", backup_note]
         for vendor, skus in sku_by_vendor.items()
     ]
 
     start_row = get_last_row()
-    range_to_write = f'{SHEET_NAME}!A{start_row}:M{start_row + len(rows_data) - 1}'  # Updated to M
+    range_to_write = f'{SHEET_NAME}!A{start_row}:M{start_row + len(rows_data) - 1}'
     body = {'values': rows_data}
     result = service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID, range=range_to_write,
@@ -273,7 +271,7 @@ def remove_fulfilled_sku(data):
     line_items = data.get("line_items", [])
 
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
     ).execute()
     values = result.get('values', [])
 
@@ -285,12 +283,12 @@ def remove_fulfilled_sku(data):
                     skus.remove(item['sku'])
             if not skus:
                 service.spreadsheets().values().clear(
-                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}'  # Updated to M
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}'
                 ).execute()
             else:
                 values[i][3] = ', '.join(skus)
                 service.spreadsheets().values().update(
-                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}',  # Updated to M
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}',
                     valueInputOption='RAW', body={'values': [values[i]]}
                 ).execute()
             break
@@ -299,29 +297,44 @@ def remove_fulfilled_sku(data):
 
 def apply_formulas():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
     ).execute()
     values = result.get('values', [])
     last_row = len(values) + 1 if values else 2
 
-    formulas = []
+    assign_type_formulas = []
+    pic_formulas = []
     for row in range(2, last_row + 1):
-        # Updated formula for PIC column (I), Country (F), Brand (E)
-        formula = (
+        # Assign Type (G)
+        assign_type_formula = (
+            f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
+            f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
+        )
+        # PIC (I)
+        pic_formula = (
             f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
             f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
         )
-        formulas.append([formula])
+        assign_type_formulas.append([assign_type_formula])
+        pic_formulas.append([pic_formula])
 
-    if formulas:
+    # Assign Type formulas to column G
+    if assign_type_formulas:
         service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',  # PIC is now column I
-            valueInputOption='USER_ENTERED', body={'values': formulas}
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
+            valueInputOption='USER_ENTERED', body={'values': assign_type_formulas}
+        ).execute()
+
+    # PIC formulas to column I
+    if pic_formulas:
+        service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',
+            valueInputOption='USER_ENTERED', body={'values': pic_formulas}
         ).execute()
 
 def delete_rows():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
     ).execute()
     values = result.get('values', [])
     rows_to_clear = []
@@ -329,7 +342,7 @@ def delete_rows():
     for i, row in enumerate(values):
         sku_cell = row[3] if len(row) > 3 else ''
         if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')  # Updated to M
+            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')
 
     for row_range in rows_to_clear:
         service.spreadsheets().values().clear(
@@ -338,7 +351,7 @@ def delete_rows():
 
 def delete_duplicate_rows():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
     ).execute()
     values = result.get('values', [])
     unique_rows = {}
@@ -347,7 +360,7 @@ def delete_duplicate_rows():
     for i, row in enumerate(values):
         row_str = ','.join(map(str, row))
         if row_str in unique_rows:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')  # Updated to M
+            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')
         else:
             unique_rows[row_str] = True
 
