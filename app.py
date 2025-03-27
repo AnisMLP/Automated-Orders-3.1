@@ -64,14 +64,11 @@ def save_queue(queue):
 def clean_json(raw_data):
     """Clean up common JSON syntax errors like trailing commas and empty lines."""
     try:
-        
         if isinstance(raw_data, bytes):
             raw_data = raw_data.decode('utf-8')
-        
         lines = [line.strip() for line in raw_data.splitlines() if line.strip()]
         cleaned = '\n'.join(lines)
-        
-        cleaned = re.sub(r',(\s*[\]}])', r'\1', cleaned) 
+        cleaned = re.sub(r',(\s*[\]}])', r'\1', cleaned)
         return cleaned
     except Exception as e:
         logger.error(f"Error cleaning JSON: {str(e)}")
@@ -101,7 +98,7 @@ def get_last_row():
         return 1
     try:
         result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M (13 columns)
         ).execute()
         values = result.get('values', [])
         return len(values) + 1 if values else 1
@@ -110,7 +107,7 @@ def get_last_row():
         return 1
 
 def process_order(data):
-    """Process a single order and write to Google Sheets."""
+    """Process a single order and write to Google Sheets with new column structure."""
     if not service:
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
@@ -124,11 +121,12 @@ def process_order(data):
 
         if not line_items:
             logger.warning(f"Order {order_number} has no line items, skipping Google Sheets write")
-            return True 
+            return True
 
         sku_by_vendor = group_skus_by_vendor(line_items)
+        # New structure: Date, Order Number, URL, SKU, Brand, Country, Assign Type, Date Due, PIC, Status, PO Number, What's happening, Notes
         rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country]
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", ""]
             for vendor, skus in sku_by_vendor.items()
         ]
 
@@ -195,7 +193,6 @@ def handle_webhook():
     order_number = "Unknown"
     raw_data = request.data
 
-    # Try cleaning and parsing the JSON
     cleaned_data = clean_json(raw_data)
     try:
         data = json.loads(cleaned_data)
@@ -251,13 +248,14 @@ def add_backup_shipping_note(data):
     line_items = data.get("line_items", [])
 
     sku_by_vendor = group_skus_by_vendor(line_items)
+    # Updated to 13 columns
     rows_data = [
-        [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", backup_note]
+        [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", backup_note]
         for vendor, skus in sku_by_vendor.items()
     ]
 
     start_row = get_last_row()
-    range_to_write = f'{SHEET_NAME}!A{start_row}:K{start_row + len(rows_data) - 1}'
+    range_to_write = f'{SHEET_NAME}!A{start_row}:M{start_row + len(rows_data) - 1}'  # Updated to M
     body = {'values': rows_data}
     result = service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID, range=range_to_write,
@@ -275,7 +273,7 @@ def remove_fulfilled_sku(data):
     line_items = data.get("line_items", [])
 
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
     ).execute()
     values = result.get('values', [])
 
@@ -287,12 +285,12 @@ def remove_fulfilled_sku(data):
                     skus.remove(item['sku'])
             if not skus:
                 service.spreadsheets().values().clear(
-                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:K{i+1}'
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}'  # Updated to M
                 ).execute()
             else:
                 values[i][3] = ', '.join(skus)
                 service.spreadsheets().values().update(
-                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:K{i+1}',
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}',  # Updated to M
                     valueInputOption='RAW', body={'values': [values[i]]}
                 ).execute()
             break
@@ -301,28 +299,29 @@ def remove_fulfilled_sku(data):
 
 def apply_formulas():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
     ).execute()
     values = result.get('values', [])
     last_row = len(values) + 1 if values else 2
 
     formulas = []
     for row in range(2, last_row + 1):
+        # Updated formula for PIC column (I), Country (F), Brand (E)
         formula = (
-            f'=IFNA(IF(F{row} = "US", IFNA(XLOOKUP(E{row}, assign_types!D:D, assign_types!E:E), '
-            f'XLOOKUP(E{row}, assign_types!A:A, assign_types!B:B)), XLOOKUP(E{row}, assign_types!A:A, assign_types!B:B)), "")'
+            f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
+            f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
         )
         formulas.append([formula])
 
     if formulas:
         service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',  # PIC is now column I
             valueInputOption='USER_ENTERED', body={'values': formulas}
         ).execute()
 
 def delete_rows():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
     ).execute()
     values = result.get('values', [])
     rows_to_clear = []
@@ -330,7 +329,7 @@ def delete_rows():
     for i, row in enumerate(values):
         sku_cell = row[3] if len(row) > 3 else ''
         if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:K{i+1}')
+            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')  # Updated to M
 
     for row_range in rows_to_clear:
         service.spreadsheets().values().clear(
@@ -339,7 +338,7 @@ def delete_rows():
 
 def delete_duplicate_rows():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:K'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'  # Updated to M
     ).execute()
     values = result.get('values', [])
     unique_rows = {}
@@ -348,7 +347,7 @@ def delete_duplicate_rows():
     for i, row in enumerate(values):
         row_str = ','.join(map(str, row))
         if row_str in unique_rows:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:K{i+1}')
+            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')  # Updated to M
         else:
             unique_rows[row_str] = True
 
