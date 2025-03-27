@@ -7,6 +7,7 @@ import os
 import json
 from dotenv import load_dotenv
 import time
+import re
 
 load_dotenv()
 app = Flask(__name__)
@@ -59,6 +60,24 @@ def save_queue(queue):
             json.dump(queue, f)
     except Exception as e:
         logger.error(f"Error saving queue: {str(e)}")
+
+def clean_json(raw_data):
+    """Clean up common JSON syntax errors like trailing commas and empty lines."""
+    try:
+        # Decode bytes to string if necessary
+        if isinstance(raw_data, bytes):
+            raw_data = raw_data.decode('utf-8')
+        
+        # Remove empty lines and normalize whitespace
+        lines = [line.strip() for line in raw_data.splitlines() if line.strip()]
+        cleaned = '\n'.join(lines)
+        
+        # Fix trailing commas in arrays/objects
+        cleaned = re.sub(r',(\s*[\]}])', r'\1', cleaned)  # Remove comma before closing bracket
+        return cleaned
+    except Exception as e:
+        logger.error(f"Error cleaning JSON: {str(e)}")
+        return raw_data
 
 def format_date(date_str):
     try:
@@ -141,18 +160,16 @@ def process_queue():
         logger.info("Queue is empty, nothing to process")
         return
 
-    updated_queue = []  # New queue to keep unprocessed/error items
+    updated_queue = []
     for order in queue:
         order_number = order.get("order_number", "Unknown")
         logger.info(f"Inspecting queued order {order_number}")
 
-        # Skip if it's an error entry
         if "error" in order:
             logger.info(f"Order {order_number} has an error, keeping in queue: {order['error']}")
             updated_queue.append(order)
             continue
 
-        # Process valid order
         logger.info(f"Attempting to process valid order {order_number}")
         if process_order(order):
             logger.info(f"Order {order_number} processed successfully, removing from queue")
@@ -162,7 +179,7 @@ def process_queue():
 
     save_queue(updated_queue)
     logger.info(f"Queue processing complete. New queue size: {len(updated_queue)}")
-    time.sleep(2)  # Delay to avoid Google Sheets rate limits
+    time.sleep(2)
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -178,11 +195,15 @@ def handle_webhook():
 
     queue = load_queue()
     order_number = "Unknown"
+    raw_data = request.data
+
+    # Try cleaning and parsing the JSON
+    cleaned_data = clean_json(raw_data)
     try:
-        data = request.get_json(force=True)
+        data = json.loads(cleaned_data)
         if not data:
-            logger.error("No valid JSON data provided in webhook request")
-            queue.append({"error": "No valid JSON data", "order_number": order_number, "raw_data": request.data.decode('utf-8')})
+            logger.error("No valid JSON data after cleaning")
+            queue.append({"error": "No valid JSON data after cleaning", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
             save_queue(queue)
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
@@ -194,23 +215,23 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            process_queue()  # Process immediately
+            process_queue()
             return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
         else:
             logger.error(f"Invalid action: {action}")
-            queue.append({"error": f"Invalid action: {action}", "order_number": order_number, "raw_data": request.data.decode('utf-8')})
+            queue.append({"error": f"Invalid action: {action}", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
             save_queue(queue)
             return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid action"}), 200
     except ValueError as e:
-        logger.error(f"Invalid JSON received: {str(e)}")
-        queue.append({"error": f"Invalid JSON: {str(e)}", "order_number": order_number, "raw_data": request.data.decode('utf-8')})
+        logger.error(f"Failed to parse JSON even after cleaning: {str(e)}")
+        queue.append({"error": f"Invalid JSON: {str(e)}", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
         save_queue(queue)
         return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid JSON"}), 200
     except Exception as e:
         logger.error(f"Error processing webhook request: {str(e)}")
-        queue.append({"error": str(e), "order_number": order_number, "raw_data": request.data.decode('utf-8')})
+        queue.append({"error": str(e), "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
         save_queue(queue)
         return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: {str(e)}"}), 200
 
