@@ -169,7 +169,7 @@ def process_order(data):
 
         sku_by_vendor = group_skus_by_vendor(line_items)
         rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "Warning: ⚠️ Please check!!!", ""]
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "", ""]
             for vendor, skus in sku_by_vendor.items()
         ]
 
@@ -297,7 +297,7 @@ def add_backup_shipping_note(data):
 
     sku_by_vendor = group_skus_by_vendor(line_items)
     rows_data = [
-        [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "Warning: ⚠️ Please check!!!", backup_note]
+        [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "", backup_note]
         for vendor, skus in sku_by_vendor.items()
     ]
 
