@@ -77,7 +77,7 @@ def clean_json(raw_data):
 def format_date(date_str):
     try:
         date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        return f"{date.year}-{date.month:02d}-{date.day:02d}"
+        return f"{date.year}-{str(date.month).zfill(2)}-{str(date.day).zfill(2)}"
     except Exception as e:
         logger.error(f"Error formatting date {date_str}: {str(e)}")
         return "Invalid Date"
@@ -85,8 +85,7 @@ def format_date(date_str):
 def group_skus_by_vendor(line_items):
     sku_by_vendor = {}
     for item in line_items:
-        sku = item.get('sku', 'Unknown SKU')
-        vendor = item.get('vendor', 'Unknown Vendor')
+        sku, vendor = item.get('sku', 'Unknown SKU'), item.get('vendor', 'Unknown Vendor')
         if vendor not in sku_by_vendor:
             sku_by_vendor[vendor] = [sku]
         else:
@@ -99,8 +98,7 @@ def get_last_row():
         return 1
     try:
         result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f'{SHEET_NAME}!A:N'
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
         values = result.get('values', [])
         return len(values) + 1 if values else 1
@@ -108,50 +106,8 @@ def get_last_row():
         logger.error(f"Error getting last row: {str(e)}")
         return 1
 
-def get_total_rows():
-    if not service:
-        logger.error("Google Sheets service not initialized")
-        return 1000
-    try:
-        result = service.spreadsheets().get(
-            spreadsheetId=SPREADSHEET_ID,
-            ranges=f'{SHEET_NAME}'
-        ).execute()
-        sheet = result['sheets'][0]['properties']
-        return sheet['gridProperties']['rowCount']
-    except Exception as e:
-        logger.error(f"Error getting total rows: {str(e)}")
-        return 1000
-
-def add_rows_if_needed(required_rows, buffer=1000):
-    if not service:
-        logger.error("Cannot add rows: Google Sheets service not initialized")
-        return False
-    try:
-        total_rows = get_total_rows()
-        last_row = get_last_row()
-        available_rows = total_rows - last_row + 1
-        if available_rows < required_rows:
-            rows_to_add = required_rows - available_rows + buffer
-            logger.info(f"Adding {rows_to_add} rows to sheet")
-            request = {
-                "appendDimension": {
-                    "sheetId": 0,
-                    "dimension": "ROWS",
-                    "length": rows_to_add
-                }
-            }
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=SPREADSHEET_ID,
-                body={"requests": [request]}
-            ).execute()
-            logger.info(f"Added {rows_to_add} rows successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Error adding rows: {str(e)}")
-        return False
-
 def process_order(data):
+    """Process a single order and write to Google Sheets with new column structure."""
     if not service:
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
@@ -173,19 +129,13 @@ def process_order(data):
             for vendor, skus in sku_by_vendor.items()
         ]
 
-        if not add_rows_if_needed(len(rows_data)):
-            logger.error(f"Failed to add rows for order {order_number}")
-            return False
-
         start_row = get_last_row()
         range_to_write = f'{SHEET_NAME}!A{start_row}'
         body = {'values': rows_data}
         logger.info(f"Writing order {order_number} to Google Sheets at {range_to_write}")
         result = service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=range_to_write,
-            valueInputOption='RAW',
-            body=body
+            spreadsheetId=SPREADSHEET_ID, range=range_to_write,
+            valueInputOption='RAW', body=body
         ).execute()
 
         apply_formulas()
@@ -199,6 +149,7 @@ def process_order(data):
         return False
 
 def process_queue():
+    """Process all valid orders in the queue, skipping error entries."""
     queue = load_queue()
     if not queue:
         logger.info("Queue is empty, nothing to process")
@@ -301,18 +252,12 @@ def add_backup_shipping_note(data):
         for vendor, skus in sku_by_vendor.items()
     ]
 
-    if not add_rows_if_needed(len(rows_data)):
-        logger.error(f"Failed to add rows for backup shipping note order {order_number}")
-        return jsonify({"status": "error", "message": "Failed to add rows"}), 500
-
     start_row = get_last_row()
     range_to_write = f'{SHEET_NAME}!A{start_row}:N{start_row + len(rows_data) - 1}'
     body = {'values': rows_data}
     result = service.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID,
-        range=range_to_write,
-        valueInputOption='RAW',
-        body=body
+        spreadsheetId=SPREADSHEET_ID, range=range_to_write,
+        valueInputOption='RAW', body=body
     ).execute()
 
     apply_formulas()
@@ -326,11 +271,10 @@ def remove_fulfilled_sku(data):
     line_items = data.get("line_items", [])
 
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f'{SHEET_NAME}!A:N'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
-
     values = result.get('values', [])
+
     for i, row in enumerate(values):
         if len(row) > 1 and row[1] == order_number:
             skus = row[3].split(', ') if len(row) > 3 else []
@@ -339,16 +283,13 @@ def remove_fulfilled_sku(data):
                     skus.remove(item['sku'])
             if not skus:
                 service.spreadsheets().values().clear(
-                    spreadsheetId=SPREADSHEET_ID,
-                    range=f'{SHEET_NAME}!A{i+1}:N{i+1}'
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}'
                 ).execute()
             else:
                 values[i][3] = ', '.join(skus)
                 service.spreadsheets().values().update(
-                    spreadsheetId=SPREADSHEET_ID,
-                    range=f'{SHEET_NAME}!A{i+1}:N{i+1}',
-                    valueInputOption='RAW',
-                    body={'values': [values[i]]}
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}',
+                    valueInputOption='RAW', body={'values': [values[i]]}
                 ).execute()
             break
 
@@ -356,8 +297,7 @@ def remove_fulfilled_sku(data):
 
 def apply_formulas():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f'{SHEET_NAME}!A:N'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
     values = result.get('values', [])
     last_row = len(values) + 1 if values else 2
@@ -365,31 +305,36 @@ def apply_formulas():
     assign_type_formulas = []
     pic_formulas = []
     for row in range(2, last_row + 1):
-        assign_type_formula = f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
-        pic_formula = f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
+        # Assign Type (G)
+        assign_type_formula = (
+            f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
+            f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
+        )
+        # PIC (I)
+        pic_formula = (
+            f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
+            f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
+        )
         assign_type_formulas.append([assign_type_formula])
         pic_formulas.append([pic_formula])
 
+    # Assign Type formulas to column G
     if assign_type_formulas:
         service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f'{SHEET_NAME}!G2:G{last_row}',
-            valueInputOption='USER_ENTERED',
-            body={'values': assign_type_formulas}
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
+            valueInputOption='USER_ENTERED', body={'values': assign_type_formulas}
         ).execute()
 
+    # PIC formulas to column I
     if pic_formulas:
         service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=f'{SHEET_NAME}!I2:I{last_row}',
-            valueInputOption='USER_ENTERED',
-            body={'values': pic_formulas}
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',
+            valueInputOption='USER_ENTERED', body={'values': pic_formulas}
         ).execute()
 
 def delete_rows():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f'{SHEET_NAME}!A:N'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
     values = result.get('values', [])
     rows_to_clear = []
@@ -401,14 +346,12 @@ def delete_rows():
 
     for row_range in rows_to_clear:
         service.spreadsheets().values().clear(
-            spreadsheetId=SPREADSHEET_ID,
-            range=row_range
+            spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
 def delete_duplicate_rows():
     result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID,
-        range=f'{SHEET_NAME}!A:N'
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
     values = result.get('values', [])
     unique_rows = {}
@@ -423,8 +366,7 @@ def delete_duplicate_rows():
 
     for row_range in rows_to_clear:
         service.spreadsheets().values().clear(
-            spreadsheetId=SPREADSHEET_ID,
-            range=row_range
+            spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
 @app.route('/', methods=['GET'])
