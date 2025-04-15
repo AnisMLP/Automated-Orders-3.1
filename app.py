@@ -252,6 +252,15 @@ def view_queue():
     logger.info(f"Queue accessed. Size: {len(queue)}")
     return jsonify({"queue_size": len(queue), "orders": queue}), 200
 
+@app.route('/clear_queue', methods=['POST'])
+def clear_queue():
+    provided_key = request.args.get('key')
+    if provided_key != SECRET_KEY:
+        return jsonify({"error": "Access Denied"}), 403
+    save_queue([])
+    logger.info("Queue cleared")
+    return jsonify({"status": "success", "message": "Queue cleared"}), 200
+
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
     order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
@@ -281,7 +290,7 @@ def add_backup_shipping_note(data):
     return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
 
 def remove_fulfilled_sku(data):
-    order_number = data.get("order_number")
+    order_number = data.get("order_number", "Unknown").lstrip("#")
     line_items = data.get("line_items", [])
     logger.info(f"Processing remove_fulfilled_sku for order {order_number}, line_items: {line_items}")
 
@@ -297,29 +306,30 @@ def remove_fulfilled_sku(data):
         logger.info(f"Retrieved {len(values)} rows from sheet")
 
         rows_to_delete = []
+        rows_to_update = []
         for i, row in enumerate(values):
-            if len(row) > 1 and row[1] == order_number:
+            if len(row) > 1 and row[1].lstrip("#") == order_number:
+                logger.info(f"Found matching row {i+1} for order {order_number}")
+                skus = row[3].split(', ') if len(row) > 3 and row[3] else []
                 if not line_items:
                     logger.info(f"No line items provided, marking row {i+1} for deletion")
                     rows_to_delete.append(i)
                     continue
-                skus = row[3].split(', ') if len(row) > 3 else []
                 for item in line_items:
-                    if item['sku'] in skus:
-                        skus.remove(item['sku'])
+                    sku = item.get('sku')
+                    if sku and sku in skus:
+                        skus.remove(sku)
+                        logger.info(f"Removed SKU {sku} from row {i+1}")
                 if not skus:
                     logger.info(f"No SKUs remain in row {i+1}, marking for deletion")
                     rows_to_delete.append(i)
                 else:
-                    values[i][3] = ', '.join(skus)
-                    service.spreadsheets().values().update(
-                        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}',
-                        valueInputOption='RAW', body={'values': [values[i]]}
-                    ).execute()
-                break  # Keep your original break to match first row only
+                    row[3] = ', '.join(skus)
+                    rows_to_update.append((i, row))
+                    logger.info(f"Updated row {i+1} with SKUs: {row[3]}")
 
         if rows_to_delete:
-            rows_to_delete.sort(reverse=True)  # Delete in reverse to avoid index issues
+            rows_to_delete.sort(reverse=True)
             try:
                 request_body = {
                     "requests": [
@@ -343,7 +353,22 @@ def remove_fulfilled_sku(data):
                 logger.info(f"Deleted rows: {rows_to_delete}")
             except Exception as e:
                 logger.error(f"Error deleting rows for order {order_number}: {str(e)}")
-                return jsonify({"status": "error", "message": f"Failed to delete row: {str(e)}"}), 500
+                return jsonify({"status": "error", "message": f"Failed to delete rows: {str(e)}"}), 500
+
+        for i, row in rows_to_update:
+            try:
+                service.spreadsheets().values().update(
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}',
+                    valueInputOption='RAW', body={'values': [row]}
+                ).execute()
+                logger.info(f"Updated row {i+1}")
+            except Exception as e:
+                logger.error(f"Error updating row {i+1}: {str(e)}")
+                return jsonify({"status": "error", "message": f"Failed to update row: {str(e)}"}), 500
+
+        if not rows_to_delete and not rows_to_update:
+            logger.warning(f"No rows found for order {order_number}")
+            return jsonify({"status": "success", "message": "No matching rows found"}), 200
 
         return jsonify({"status": "success", "message": "Fulfilled SKUs removed or rows deleted"}), 200
     except Exception as e:
