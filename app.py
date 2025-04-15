@@ -8,8 +8,6 @@ import json
 from dotenv import load_dotenv
 import time
 import re
-import threading
-from queue import Queue
 
 load_dotenv()
 app = Flask(__name__)
@@ -99,11 +97,9 @@ def get_last_row():
         logger.error("Google Sheets service not initialized")
         return 1
     try:
-        start_time = time.time()
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
-        logger.info(f"get_last_row took {time.time() - start_time:.2f} seconds")
         values = result.get('values', [])
         return len(values) + 1 if values else 1
     except Exception as e:
@@ -111,7 +107,7 @@ def get_last_row():
         return 1
 
 def process_order(data):
-    """Process a single order and write to Google Sheets."""
+    """Process a single order and write to Google Sheets with new column structure."""
     if not service:
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
@@ -133,7 +129,6 @@ def process_order(data):
             for vendor, skus in sku_by_vendor.items()
         ]
 
-        start_time = time.time()
         start_row = get_last_row()
         range_to_write = f'{SHEET_NAME}!A{start_row}'
         body = {'values': rows_data}
@@ -142,22 +137,25 @@ def process_order(data):
             spreadsheetId=SPREADSHEET_ID, range=range_to_write,
             valueInputOption='RAW', body=body
         ).execute()
-        logger.info(f"Write operation took {time.time() - start_time:.2f} seconds")
 
+        apply_formulas()
+        delete_rows()
+        delete_duplicate_rows()
+
+        logger.info(f"Successfully processed order {order_number} to Google Sheets")
         return True
     except Exception as e:
         logger.error(f"Error processing order {data.get('order_number', 'Unknown')}: {str(e)}")
         return False
 
-def batch_process_queue(batch_size=5):
-    """Process orders in batches to avoid timeouts."""
+def process_queue():
+    """Process all valid orders in the queue, skipping error entries."""
     queue = load_queue()
     if not queue:
         logger.info("Queue is empty, nothing to process")
         return
 
     updated_queue = []
-    batch = []
     for order in queue:
         order_number = order.get("order_number", "Unknown")
         logger.info(f"Inspecting queued order {order_number}")
@@ -167,40 +165,16 @@ def batch_process_queue(batch_size=5):
             updated_queue.append(order)
             continue
 
-        batch.append(order)
-        if len(batch) >= batch_size:
-            logger.info(f"Processing batch of {len(batch)} orders")
-            for batched_order in batch:
-                if process_order(batched_order):
-                    logger.info(f"Order {batched_order.get('order_number', 'Unknown')} processed successfully")
-                else:
-                    logger.warning(f"Order {batched_order.get('order_number', 'Unknown')} failed, keeping in queue")
-                    updated_queue.append(batched_order)
-            # Run cleanup once per batch
-            apply_formulas()
-            delete_rows()
-            delete_duplicate_rows()
-            batch = []
-
-    # Process remaining orders
-    if batch:
-        logger.info(f"Processing final batch of {len(batch)} orders")
-        for batched_order in batch:
-            if process_order(batched_order):
-                logger.info(f"Order {batched_order.get('order_number', 'Unknown')} processed successfully")
-            else:
-                logger.warning(f"Order {batched_order.get('order_number', 'Unknown')} failed, keeping in queue")
-                updated_queue.append(batched_order)
-        apply_formulas()
-        delete_rows()
-        delete_duplicate_rows()
+        logger.info(f"Attempting to process valid order {order_number}")
+        if process_order(order):
+            logger.info(f"Order {order_number} processed successfully, removing from queue")
+        else:
+            logger.warning(f"Order {order_number} failed processing, keeping in queue for inspection")
+            updated_queue.append(order)
 
     save_queue(updated_queue)
     logger.info(f"Queue processing complete. New queue size: {len(updated_queue)}")
-
-def async_batch_process_queue():
-    """Run batch_process_queue in a background thread."""
-    threading.Thread(target=batch_process_queue, daemon=True).start()
+    time.sleep(2)
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -214,57 +188,46 @@ def handle_webhook():
     logger.info(f"Raw request data: {request.data}")
     logger.info(f"Request headers: {request.headers}")
 
-    raw_data = request.data
-    order_number = "Unknown"
-
-    # Early deduplication
     queue = load_queue()
+    order_number = "Unknown"
+    raw_data = request.data
+
+    cleaned_data = clean_json(raw_data)
     try:
-        cleaned_data = clean_json(raw_data)
         data = json.loads(cleaned_data)
         if not data:
             logger.error("No valid JSON data after cleaning")
             queue.append({"error": "No valid JSON data after cleaning", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
-            threading.Thread(target=save_queue, args=(queue,), daemon=True).start()
+            save_queue(queue)
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
         order_number = data.get("order_number", "Unknown")
-        if any(order.get("order_number") == order_number for order in queue):
-            logger.info(f"Order {order_number} already in queue, skipping addition")
-            return jsonify({"status": "queued", "message": f"Order {order_number} already queued"}), 200
+        action = request.args.get('action', '')
+        if data.get("backup_shipping_note"):
+            return add_backup_shipping_note(data)
+        elif action == 'addNewOrders':
+            queue.append(data)
+            save_queue(queue)
+            logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
+            process_queue()
+            return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
+        elif action == 'removeFulfilledSKU':
+            return remove_fulfilled_sku(data)
+        else:
+            logger.error(f"Invalid action: {action}")
+            queue.append({"error": f"Invalid action: {action}", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
+            save_queue(queue)
+            return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid action"}), 200
     except ValueError as e:
         logger.error(f"Failed to parse JSON even after cleaning: {str(e)}")
         queue.append({"error": f"Invalid JSON: {str(e)}", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
-        threading.Thread(target=save_queue, args=(queue,), daemon=True).start()
+        save_queue(queue)
         return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid JSON"}), 200
     except Exception as e:
         logger.error(f"Error processing webhook request: {str(e)}")
         queue.append({"error": str(e), "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
-        threading.Thread(target=save_queue, args=(queue,), daemon=True).start()
+        save_queue(queue)
         return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: {str(e)}"}), 200
-
-    # Process after response
-    action = request.args.get('action', '')
-    if data.get("backup_shipping_note"):
-        result = add_backup_shipping_note(data)
-        async_batch_process_queue()
-        return result
-    elif action == 'addNewOrders':
-        queue.append(data)
-        logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-        threading.Thread(target=save_queue, args=(queue,), daemon=True).start()
-        async_batch_process_queue()
-        return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
-    elif action == 'removeFulfilledSKU':
-        result = remove_fulfilled_sku(data)
-        async_batch_process_queue()
-        return result
-    else:
-        logger.error(f"Invalid action: {action}")
-        queue.append({"error": f"Invalid action: {action}", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
-        threading.Thread(target=save_queue, args=(queue,), daemon=True).start()
-        async_batch_process_queue()
-        return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid action"}), 200
 
 @app.route('/queue', methods=['GET'])
 def view_queue():
@@ -289,16 +252,13 @@ def add_backup_shipping_note(data):
         for vendor, skus in sku_by_vendor.items()
     ]
 
-    start_time = time.time()
     start_row = get_last_row()
     range_to_write = f'{SHEET_NAME}!A{start_row}:N{start_row + len(rows_data) - 1}'
     body = {'values': rows_data}
-    logger.info(f"Writing backup note for order {order_number} at {range_to_write}")
     result = service.spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID, range=range_to_write,
         valueInputOption='RAW', body=body
     ).execute()
-    logger.info(f"Backup note write took {time.time() - start_time:.2f} seconds")
 
     apply_formulas()
     delete_rows()
@@ -310,11 +270,9 @@ def remove_fulfilled_sku(data):
     order_number = data.get("order_number")
     line_items = data.get("line_items", [])
 
-    start_time = time.time()
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
-    logger.info(f"remove_fulfilled_sku get took {time.time() - start_time:.2f} seconds")
     values = result.get('values', [])
 
     for i, row in enumerate(values):
@@ -335,25 +293,24 @@ def remove_fulfilled_sku(data):
                 ).execute()
             break
 
-    logger.info(f"remove_fulfilled_sku completed for {order_number} in {time.time() - start_time:.2f} seconds")
     return jsonify({"status": "success", "message": "Fulfilled SKUs removed"}), 200
 
 def apply_formulas():
-    start_time = time.time()
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
-    logger.info(f"apply_formulas get took {time.time() - start_time:.2f} seconds")
     values = result.get('values', [])
     last_row = len(values) + 1 if values else 2
 
     assign_type_formulas = []
     pic_formulas = []
     for row in range(2, last_row + 1):
+        # Assign Type (G)
         assign_type_formula = (
             f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
             f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
         )
+        # PIC (I)
         pic_formula = (
             f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
             f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
@@ -361,26 +318,24 @@ def apply_formulas():
         assign_type_formulas.append([assign_type_formula])
         pic_formulas.append([pic_formula])
 
+    # Assign Type formulas to column G
     if assign_type_formulas:
         service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
             valueInputOption='USER_ENTERED', body={'values': assign_type_formulas}
         ).execute()
 
+    # PIC formulas to column I
     if pic_formulas:
         service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',
             valueInputOption='USER_ENTERED', body={'values': pic_formulas}
         ).execute()
 
-    logger.info(f"apply_formulas completed in {time.time() - start_time:.2f} seconds")
-
 def delete_rows():
-    start_time = time.time()
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
-    logger.info(f"delete_rows get took {time.time() - start_time:.2f} seconds")
     values = result.get('values', [])
     rows_to_clear = []
 
@@ -394,14 +349,10 @@ def delete_rows():
             spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
-    logger.info(f"delete_rows completed in {time.time() - start_time:.2f} seconds")
-
 def delete_duplicate_rows():
-    start_time = time.time()
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
-    logger.info(f"delete_duplicate_rows get took {time.time() - start_time:.2f} seconds")
     values = result.get('values', [])
     unique_rows = {}
     rows_to_clear = []
@@ -417,8 +368,6 @@ def delete_duplicate_rows():
         service.spreadsheets().values().clear(
             spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
-
-    logger.info(f"delete_duplicate_rows cleared {len(rows_to_clear)} rows in {time.time() - start_time:.2f} seconds")
 
 @app.route('/', methods=['GET'])
 def health_check():
