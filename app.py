@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 import time
 import re
+import uuid
 
 load_dotenv()
 app = Flask(__name__)
@@ -106,6 +107,18 @@ def get_last_row():
     except Exception as e:
         logger.error(f"Error getting last row: {str(e)}")
         return 1
+
+def get_sheet_id():
+    """Helper function to get the sheet ID for the SHEET_NAME."""
+    try:
+        spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        for sheet in spreadsheet['sheets']:
+            if sheet['properties']['title'] == SHEET_NAME:
+                return sheet['properties']['sheetId']
+        raise ValueError(f"Sheet {SHEET_NAME} not found")
+    except Exception as e:
+        logger.error(f"Error getting sheet ID: {str(e)}")
+        raise
 
 def process_order(data):
     """Process a single order and write to Google Sheets with new column structure."""
@@ -283,9 +296,28 @@ def remove_fulfilled_sku(data):
                 if item['sku'] in skus:
                     skus.remove(item['sku'])
             if not skus:
-                service.spreadsheets().values().clear(
-                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}'
-                ).execute()
+                try:
+                    request_body = {
+                        "requests": [
+                            {
+                                "deleteDimension": {
+                                    "range": {
+                                        "sheetId": get_sheet_id(),
+                                        "dimension": "ROWS",
+                                        "startIndex": i,
+                                        "endIndex": i + 1
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                    service.spreadsheets().batchUpdate(
+                        spreadsheetId=SPREADSHEET_ID,
+                        body=request_body
+                    ).execute()
+                except Exception as e:
+                    logger.error(f"Error deleting row for order {order_number}: {str(e)}")
+                    return jsonify({"status": "error", "message": f"Failed to delete row: {str(e)}"}), 500
             else:
                 values[i][3] = ', '.join(skus)
                 service.spreadsheets().values().update(
