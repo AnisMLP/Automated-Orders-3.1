@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 import time
 import re
+import uuid
 
 load_dotenv()
 app = Flask(__name__)
@@ -42,9 +43,6 @@ except Exception as e:
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
-
-# Cache for sheet ID
-SHEET_ID = None
 
 def load_queue():
     """Load the queue from file."""
@@ -112,19 +110,15 @@ def get_last_row():
 
 def get_sheet_id():
     """Helper function to get the sheet ID for the SHEET_NAME."""
-    global SHEET_ID
-    if SHEET_ID is None:
-        try:
-            spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-            for sheet in spreadsheet['sheets']:
-                if sheet['properties']['title'] == SHEET_NAME:
-                    SHEET_ID = sheet['properties']['sheetId']
-                    return SHEET_ID
-            raise ValueError(f"Sheet {SHEET_NAME} not found")
-        except Exception as e:
-            logger.error(f"Error getting sheet ID: {str(e)}")
-            raise
-    return SHEET_ID
+    try:
+        spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        for sheet in spreadsheet['sheets']:
+            if sheet['properties']['title'] == SHEET_NAME:
+                return sheet['properties']['sheetId']
+        raise ValueError(f"Sheet {SHEET_NAME} not found")
+    except Exception as e:
+        logger.error(f"Error getting sheet ID: {str(e)}")
+        raise
 
 def process_order(data):
     """Process a single order and write to Google Sheets with new column structure."""
@@ -132,7 +126,7 @@ def process_order(data):
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
     try:
-        order_number = data.get("order_number", "Unknown").lstrip("#")
+        order_number = data.get("order_number", "Unknown")
         logger.info(f"Processing order {order_number}")
         order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
         order_country = data.get("order_country", "Unknown")
@@ -177,7 +171,7 @@ def process_queue():
 
     updated_queue = []
     for order in queue:
-        order_number = order.get("order_number", "Unknown").lstrip("#")
+        order_number = order.get("order_number", "Unknown")
         logger.info(f"Inspecting queued order {order_number}")
 
         if "error" in order:
@@ -215,14 +209,13 @@ def handle_webhook():
     cleaned_data = clean_json(raw_data)
     try:
         data = json.loads(cleaned_data)
-        logger.info(f"Cleaned JSON: {cleaned_data}")
         if not data:
             logger.error("No valid JSON data after cleaning")
             queue.append({"error": "No valid JSON data after cleaning", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
             save_queue(queue)
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
-        order_number = data.get("order_number", "Unknown").lstrip("#")
+        order_number = data.get("order_number", "Unknown")
         action = request.args.get('action', '')
         if data.get("backup_shipping_note"):
             return add_backup_shipping_note(data)
@@ -260,7 +253,7 @@ def view_queue():
     return jsonify({"queue_size": len(queue), "orders": queue}), 200
 
 def add_backup_shipping_note(data):
-    order_number = data.get("order_number", "Unknown").lstrip("#")
+    order_number = data.get("order_number")
     order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
     order_country = data.get("order_country")
     backup_note = data.get("backup_shipping_note")
@@ -288,7 +281,7 @@ def add_backup_shipping_note(data):
     return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
 
 def remove_fulfilled_sku(data):
-    order_number = data.get("order_number", "Unknown").lstrip("#")
+    order_number = data.get("order_number")
     line_items = data.get("line_items", [])
     logger.info(f"Processing remove_fulfilled_sku for order {order_number}, line_items: {line_items}")
 
@@ -303,84 +296,56 @@ def remove_fulfilled_sku(data):
         values = result.get('values', [])
         logger.info(f"Retrieved {len(values)} rows from sheet")
 
-        rows_modified = False
         rows_to_delete = []
-        updated_rows = []
-
         for i, row in enumerate(values):
-            if len(row) > 1 and row[1].lstrip("#") == order_number:
-                logger.info(f"Found matching row {i+1} for order {order_number}")
-                skus = row[3].split(', ') if len(row) > 3 and row[3] else []
-                logger.info(f"Sheet SKUs: {skus}")
-
+            if len(row) > 1 and row[1] == order_number:
                 if not line_items:
                     logger.info(f"No line items provided, marking row {i+1} for deletion")
                     rows_to_delete.append(i)
-                    rows_modified = True
                     continue
-
-                original_skus = skus.copy()
+                skus = row[3].split(', ') if len(row) > 3 else []
                 for item in line_items:
-                    sku = item.get('sku')
-                    if sku and sku in skus:
-                        skus.remove(sku)
-                        logger.info(f"Removed SKU {sku} from row {i+1}")
-
+                    if item['sku'] in skus:
+                        skus.remove(item['sku'])
                 if not skus:
                     logger.info(f"No SKUs remain in row {i+1}, marking for deletion")
                     rows_to_delete.append(i)
-                    rows_modified = True
-                elif skus != original_skus:
-                    row[3] = ', '.join(skus)
-                    updated_rows.append((i, row))
-                    rows_modified = True
-                    logger.info(f"Updated row {i+1} with SKUs: {row[3]}")
+                else:
+                    values[i][3] = ', '.join(skus)
+                    service.spreadsheets().values().update(
+                        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}',
+                        valueInputOption='RAW', body={'values': [values[i]]}
+                    ).execute()
+                break  # Keep your original break to match first row only
 
         if rows_to_delete:
-            # Sort in reverse to avoid index shifting
-            rows_to_delete.sort(reverse=True)
+            rows_to_delete.sort(reverse=True)  # Delete in reverse to avoid index issues
             try:
-                requests = [
-                    {
-                        "deleteDimension": {
-                            "range": {
-                                "sheetId": get_sheet_id(),
-                                "dimension": "ROWS",
-                                "startIndex": row_index,
-                                "endIndex": row_index + 1
+                request_body = {
+                    "requests": [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": get_sheet_id(),
+                                    "dimension": "ROWS",
+                                    "startIndex": i,
+                                    "endIndex": i + 1
+                                }
                             }
                         }
-                    }
-                    for row_index in rows_to_delete
-                ]
+                        for i in rows_to_delete
+                    ]
+                }
                 service.spreadsheets().batchUpdate(
                     spreadsheetId=SPREADSHEET_ID,
-                    body={"requests": requests}
+                    body=request_body
                 ).execute()
                 logger.info(f"Deleted rows: {rows_to_delete}")
             except Exception as e:
                 logger.error(f"Error deleting rows for order {order_number}: {str(e)}")
-                return jsonify({"status": "error", "message": f"Failed to delete rows: {str(e)}"}), 500
-
-        for row_index, row_data in updated_rows:
-            try:
-                service.spreadsheets().values().update(
-                    spreadsheetId=SPREADSHEET_ID,
-                    range=f'{SHEET_NAME}!A{row_index+1}:N{row_index+1}',
-                    valueInputOption='RAW',
-                    body={'values': [row_data]}
-                ).execute()
-                logger.info(f"Updated row {row_index+1}")
-            except Exception as e:
-                logger.error(f"Error updating row {row_index+1}: {str(e)}")
-                return jsonify({"status": "error", "message": f"Failed to update row: {str(e)}"}), 500
-
-        if not rows_modified:
-            logger.warning(f"No rows modified for order {order_number}")
-            return jsonify({"status": "success", "message": "No matching rows found or modified"}), 200
+                return jsonify({"status": "error", "message": f"Failed to delete row: {str(e)}"}), 500
 
         return jsonify({"status": "success", "message": "Fulfilled SKUs removed or rows deleted"}), 200
-
     except Exception as e:
         logger.error(f"Error in remove_fulfilled_sku for order {order_number}: {str(e)}")
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
@@ -431,7 +396,7 @@ def delete_rows():
 
     for i, row in enumerate(values):
         sku_cell = row[3] if len(row) > 3 else ''
-        if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', ''] or all(cell == '' for cell in row):
+        if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
             rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:N{i+1}')
 
     for row_range in rows_to_clear:
