@@ -92,18 +92,6 @@ def group_skus_by_vendor(line_items):
             sku_by_vendor[vendor].append(sku)
     return sku_by_vendor
 
-def get_sheet_id(sheet_name):
-    """Get the sheet ID for the given sheet name."""
-    try:
-        sheet_metadata = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
-        for sheet in sheet_metadata['sheets']:
-            if sheet['properties']['title'] == sheet_name:
-                return sheet['properties']['sheetId']
-        raise ValueError(f"Sheet {sheet_name} not found")
-    except Exception as e:
-        logger.error(f"Error getting sheet ID for {sheet_name}: {str(e)}")
-        raise
-
 def get_last_row():
     if not service:
         logger.error("Google Sheets service not initialized")
@@ -294,20 +282,8 @@ def remove_fulfilled_sku(data):
                 if item['sku'] in skus:
                     skus.remove(item['sku'])
             if not skus:
-                service.spreadsheets().batchUpdate(
-                    spreadsheetId=SPREADSHEET_ID,
-                    body={
-                        "requests": [{
-                            "deleteDimension": {
-                                "range": {
-                                    "sheetId": get_sheet_id(SHEET_NAME),
-                                    "dimension": "ROWS",
-                                    "startIndex": i,
-                                    "endIndex": i + 1
-                                }
-                            }
-                        }]
-                    }
+                service.spreadsheets().values().clear(
+                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}'
                 ).execute()
             else:
                 values[i][3] = ', '.join(skus)
@@ -361,29 +337,16 @@ def delete_rows():
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
     ).execute()
     values = result.get('values', [])
-    rows_to_delete = []
+    rows_to_clear = []
 
     for i, row in enumerate(values):
         sku_cell = row[3] if len(row) > 3 else ''
         if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
-            rows_to_delete.append(i)
+            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:N{i+1}')
 
-    # Delete from bottom to top to avoid index issues
-    for i in sorted(rows_to_delete, reverse=True):
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={
-                "requests": [{
-                    "deleteDimension": {
-                        "range": {
-                            "sheetId": get_sheet_id(SHEET_NAME),
-                            "dimension": "ROWS",
-                            "startIndex": i,
-                            "endIndex": i + 1
-                        }
-                    }
-                }]
-            }
+    for row_range in rows_to_clear:
+        service.spreadsheets().values().clear(
+            spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
 def delete_duplicate_rows():
@@ -392,31 +355,18 @@ def delete_duplicate_rows():
     ).execute()
     values = result.get('values', [])
     unique_rows = {}
-    rows_to_delete = []
+    rows_to_clear = []
 
     for i, row in enumerate(values):
         row_str = ','.join(map(str, row))
         if row_str in unique_rows:
-            rows_to_delete.append(i)
+            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:N{i+1}')
         else:
             unique_rows[row_str] = True
 
-    # Delete from bottom to top to avoid index issues
-    for i in sorted(rows_to_delete, reverse=True):
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={
-                "requests": [{
-                    "deleteDimension": {
-                        "range": {
-                            "sheetId": get_sheet_id(SHEET_NAME),
-                            "dimension": "ROWS",
-                            "startIndex": i,
-                            "endIndex": i + 1
-                        }
-                    }
-                }]
-            }
+    for row_range in rows_to_clear:
+        service.spreadsheets().values().clear(
+            spreadsheetId=SPREADSHEET_ID, range=row_range
         ).execute()
 
 @app.route('/', methods=['GET'])
