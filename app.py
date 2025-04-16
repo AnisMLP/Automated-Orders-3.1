@@ -1,3 +1,4 @@
+# 17 April 2025
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -15,7 +16,6 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Version 1.0
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = '1maWDz6_g-9qOgTPwFvZsAmUPlO-d3lP4J6U4JFUgkRE'
@@ -163,32 +163,30 @@ def process_order(data):
         return False
 
 def process_queue():
-    """Process all valid orders in the queue, skipping error entries."""
+    """Process one order from the queue to avoid timeouts."""
     queue = load_queue()
     if not queue:
         logger.info("Queue is empty, nothing to process")
         return
 
-    updated_queue = []
-    for order in queue:
-        order_number = order.get("order_number", "Unknown")
-        logger.info(f"Inspecting queued order {order_number}")
+    order = queue.pop(0)  # Process only the first order
+    order_number = order.get("order_number", "Unknown")
+    logger.info(f"Inspecting queued order {order_number}")
 
-        if "error" in order:
-            logger.info(f"Order {order_number} has an error, keeping in queue: {order['error']}")
-            updated_queue.append(order)
-            continue
+    if "error" in order:
+        logger.info(f"Order {order_number} has an error, keeping in queue: {order['error']}")
+        queue.append(order)
+        save_queue(queue)
+        return
 
-        logger.info(f"Attempting to process valid order {order_number}")
-        if process_order(order):
-            logger.info(f"Order {order_number} processed successfully, removing from queue")
-        else:
-            logger.warning(f"Order {order_number} failed processing, keeping in queue for inspection")
-            updated_queue.append(order)
-
-    save_queue(updated_queue)
-    logger.info(f"Queue processing complete. New queue size: {len(updated_queue)}")
-    time.sleep(2)
+    logger.info(f"Attempting to process valid order {order_number}")
+    if process_order(order):
+        logger.info(f"Order {order_number} processed successfully, removed from queue")
+    else:
+        logger.warning(f"Order {order_number} failed processing, re-queueing")
+        queue.append(order)
+    save_queue(queue)
+    logger.info(f"Queue processing complete. New queue size: {len(queue)}")
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -216,6 +214,11 @@ def handle_webhook():
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
         order_number = data.get("order_number", "Unknown")
+        # Check for duplicate order to prevent Shopify retries
+        if any(order.get("order_number") == order_number for order in queue):
+            logger.info(f"Duplicate order {order_number} detected, skipping")
+            return jsonify({"status": "success", "message": "Duplicate order ignored"}), 200
+
         action = request.args.get('action', '')
         if data.get("backup_shipping_note"):
             return add_backup_shipping_note(data)
@@ -223,7 +226,7 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            process_queue()
+            process_queue()  # Process one order to avoid timeout
             return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
