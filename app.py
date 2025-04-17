@@ -1,3 +1,4 @@
+# 17 April 2025
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -168,10 +169,6 @@ def process_queue():
         logger.info("Queue is empty, nothing to process")
         return
 
-    # Log queue contents
-    queue_orders = [order.get("order_number", "Unknown") for order in queue]
-    logger.info(f"Current queue: {queue_orders}")
-
     order = queue.pop(0)  # Process only the first order
     order_number = order.get("order_number", "Unknown")
     logger.info(f"Inspecting queued order {order_number}")
@@ -180,8 +177,6 @@ def process_queue():
         logger.info(f"Order {order_number} has an error, keeping in queue: {order['error']}")
         queue.append(order)
         save_queue(queue)
-        # Log updated queue
-        logger.info(f"Updated queue after error: {queue_orders}")
         return
 
     logger.info(f"Attempting to process valid order {order_number}")
@@ -191,9 +186,7 @@ def process_queue():
         logger.warning(f"Order {order_number} failed processing, re-queueing")
         queue.append(order)
     save_queue(queue)
-    # Log updated queue
-    queue_orders = [order.get("order_number", "Unknown") for order in queue]
-    logger.info(f"Queue processing complete. Updated queue: {queue_orders}")
+    logger.info(f"Queue processing complete. New queue size: {len(queue)}")
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -218,9 +211,6 @@ def handle_webhook():
             logger.error("No valid JSON data after cleaning")
             queue.append({"error": "No valid JSON data after cleaning", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
             save_queue(queue)
-            # Log queue
-            queue_orders = [order.get("order_number", "Unknown") for order in queue]
-            logger.info(f"Queue after error: {queue_orders}")
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
         order_number = data.get("order_number", "Unknown")
@@ -236,10 +226,7 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            # Log queue
-            queue_orders = [order.get("order_number", "Unknown") for order in queue]
-            logger.info(f"Current queue: {queue_orders}")
-            # Do not process queue here to avoid timeout
+            process_queue()  # Process one order to avoid timeout
             return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
@@ -247,25 +234,16 @@ def handle_webhook():
             logger.error(f"Invalid action: {action}")
             queue.append({"error": f"Invalid action: {action}", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
             save_queue(queue)
-            # Log queue
-            queue_orders = [order.get("order_number", "Unknown") for order in queue]
-            logger.info(f"Queue after invalid action: {queue_orders}")
             return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid action"}), 200
     except ValueError as e:
         logger.error(f"Failed to parse JSON even after cleaning: {str(e)}")
         queue.append({"error": f"Invalid JSON: {str(e)}", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
         save_queue(queue)
-        # Log queue
-        queue_orders = [order.get("order_number", "Unknown") for order in queue]
-        logger.info(f"Queue after JSON error: {queue_orders}")
         return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid JSON"}), 200
     except Exception as e:
         logger.error(f"Error processing webhook request: {str(e)}")
         queue.append({"error": str(e), "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
         save_queue(queue)
-        # Log queue
-        queue_orders = [order.get("order_number", "Unknown") for order in queue]
-        logger.info(f"Queue after error: {queue_orders}")
         return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: {str(e)}"}), 200
 
 @app.route('/queue', methods=['GET'])
@@ -274,9 +252,7 @@ def view_queue():
     if provided_key != SECRET_KEY:
         return jsonify({"error": "Access Denied"}), 403
     queue = load_queue()
-    # Log queue
-    queue_orders = [order.get("order_number", "Unknown") for order in queue]
-    logger.info(f"Queue accessed. Size: {len(queue)}. Orders: {queue_orders}")
+    logger.info(f"Queue accessed. Size: {len(queue)}")
     return jsonify({"queue_size": len(queue), "orders": queue}), 200
 
 @app.route('/clear_queue', methods=['POST'])
@@ -287,29 +263,6 @@ def clear_queue():
     save_queue([])
     logger.info("Queue cleared")
     return jsonify({"status": "success", "message": "Queue cleared"}), 200
-
-@app.route('/download_queue', methods=['GET'])
-def download_queue():
-    provided_key = request.args.get('key')
-    if provided_key != SECRET_KEY:
-        return jsonify({"error": "Access Denied"}), 403
-    queue = load_queue()
-    # Log queue
-    queue_orders = [order.get("order_number", "Unknown") for order in queue]
-    logger.info(f"Queue downloaded. Size: {len(queue)}. Orders: {queue_orders}")
-    return jsonify(queue), 200
-
-@app.route('/process_all', methods=['POST'])
-def process_all():
-    provided_key = request.args.get('key')
-    if provided_key != SECRET_KEY:
-        return jsonify({"error": "Access Denied"}), 403
-    process_queue()
-    queue = load_queue()
-    # Log queue
-    queue_orders = [order.get("order_number", "Unknown") for order in queue]
-    logger.info(f"Processed one order. Queue size: {len(queue)}. Orders: {queue_orders}")
-    return jsonify({"status": "processing", "message": "Processed one order", "queue_size": len(queue)}), 200
 
 def add_backup_shipping_note(data):
     order_number = data.get("order_number")
