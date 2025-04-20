@@ -1,4 +1,3 @@
-# 21 April 2025
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -10,6 +9,8 @@ from dotenv import load_dotenv
 import time
 import re
 import uuid
+import fcntl
+from googleapiclient.errors import HttpError
 
 load_dotenv()
 app = Flask(__name__)
@@ -43,9 +44,30 @@ except Exception as e:
 
 # File to store queued orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
+LOCK_FILE = '/tmp/queue.lock' if IS_RENDER else 'queue.lock'
+
+def acquire_lock():
+    """Acquire a file lock for queue operations."""
+    lock_fd = open(LOCK_FILE, 'w')
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return lock_fd
+    except Exception as e:
+        logger.error(f"Failed to acquire lock: {str(e)}")
+        lock_fd.close()
+        raise
+
+def release_lock(lock_fd):
+    """Release the file lock."""
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+    except Exception as e:
+        logger.error(f"Failed to release lock: {str(e)}")
 
 def load_queue():
-    """Load the queue from file."""
+    """Load the queue from file with locking."""
+    lock_fd = acquire_lock()
     try:
         if os.path.exists(QUEUE_FILE):
             with open(QUEUE_FILE, 'r') as f:
@@ -54,14 +76,19 @@ def load_queue():
     except Exception as e:
         logger.error(f"Error loading queue: {str(e)}")
         return []
+    finally:
+        release_lock(lock_fd)
 
 def save_queue(queue):
-    """Save the queue to file."""
+    """Save the queue to file with locking."""
+    lock_fd = acquire_lock()
     try:
         with open(QUEUE_FILE, 'w') as f:
             json.dump(queue, f)
     except Exception as e:
         logger.error(f"Error saving queue: {str(e)}")
+    finally:
+        release_lock(lock_fd)
 
 def clean_json(raw_data):
     """Clean up common JSON syntax errors like trailing commas and empty lines."""
@@ -171,6 +198,13 @@ def process_order(data):
         apply_formulas()
         delete_rows()
         delete_duplicate_rows()
+
+        # Log sheet state after deletions for debugging
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
+        ).execute()
+        values = result.get('values', [])
+        logger.info(f"Sheet state after processing order {order_number}: {len(values)} rows")
 
         logger.info(f"Successfully processed order {order_number} to Google Sheets")
         return True
@@ -503,7 +537,7 @@ def delete_rows():
         logger.error(f"Error deleting rows: {str(e)}")
 
 def delete_duplicate_rows():
-    """Delete duplicate rows based on order_number, vendor, and SKUs."""
+    """Delete duplicate rows based on order_number, vendor, and SKUs with batching and retries."""
     try:
         # Fetch all rows
         result = service.spreadsheets().values().get(
@@ -534,30 +568,48 @@ def delete_duplicate_rows():
 
         if rows_to_delete:
             rows_to_delete.sort(reverse=True)  # Delete from bottom to top
-            request_body = {
-                "requests": [
-                    {
-                        "deleteDimension": {
-                            "range": {
-                                "sheetId": get_sheet_id(),
-                                "dimension": "ROWS",
-                                "startIndex": i,
-                                "endIndex": i + 1
+            batch_size = 50  # Process deletions in batches to avoid API limits
+            for i in range(0, len(rows_to_delete), batch_size):
+                batch = rows_to_delete[i:i + batch_size]
+                request_body = {
+                    "requests": [
+                        {
+                            "deleteDimension": {
+                                "range": {
+                                    "sheetId": get_sheet_id(),
+                                    "dimension": "ROWS",
+                                    "startIndex": row_idx,
+                                    "endIndex": row_idx + 1
+                                }
                             }
                         }
-                    }
-                    for i in rows_to_delete
-                ]
-            }
-            service.spreadsheets().batchUpdate(
-                spreadsheetId=SPREADSHEET_ID,
-                body=request_body
-            ).execute()
-            logger.info(f"Deleted {len(rows_to_delete)} duplicate rows")
+                        for row_idx in batch
+                    ]
+                }
+                for attempt in range(3):  # Retry up to 3 times
+                    try:
+                        service.spreadsheets().batchUpdate(
+                            spreadsheetId=SPREADSHEET_ID,
+                            body=request_body
+                        ).execute()
+                        logger.info(f"Deleted batch of {len(batch)} duplicate rows: {batch}")
+                        break
+                    except HttpError as e:
+                        if e.resp.status in [429, 503]:  # Rate limit or service unavailable
+                            logger.warning(f"Rate limit or service error on attempt {attempt+1}: {str(e)}")
+                            time.sleep(2 ** attempt)  # Exponential backoff
+                        else:
+                            logger.error(f"Error deleting batch of duplicate rows: {str(e)}")
+                            raise
+                    except Exception as e:
+                        logger.error(f"Unexpected error deleting batch of duplicate rows: {str(e)}")
+                        raise
+                else:
+                    logger.error(f"Failed to delete batch of duplicate rows after 3 attempts: {batch}")
         else:
             logger.info("No duplicate rows found")
     except Exception as e:
-        logger.error(f"Error deleting duplicate rows: {str(e)}")
+        logger.error(f"Error in delete_duplicate_rows: {str(e)}")
 
 @app.route('/', methods=['GET'])
 def health_check():
