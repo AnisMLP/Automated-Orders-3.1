@@ -1,4 +1,4 @@
-# 17 April 2025
+# 21 April 2025
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -138,6 +138,22 @@ def process_order(data):
             return True
 
         sku_by_vendor = group_skus_by_vendor(line_items)
+        if not sku_by_vendor:
+            logger.warning(f"Order {order_number} has no valid vendors, skipping")
+            return True
+
+        # Check for existing order in sheet to prevent duplicates
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
+        ).execute()
+        values = result.get('values', [])
+        for row in values:
+            if len(row) > 4 and row[1].lstrip("#") == order_number:
+                vendor = row[4] if len(row) > 4 else ""
+                if vendor in sku_by_vendor:
+                    logger.info(f"Order {order_number} with vendor {vendor} already exists in sheet, skipping")
+                    return True
+
         rows_data = [
             [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "", ""]
             for vendor, skus in sku_by_vendor.items()
@@ -272,7 +288,27 @@ def add_backup_shipping_note(data):
     order_created = format_date(data.get("order_created"))
     line_items = data.get("line_items", [])
 
+    if not line_items:
+        logger.warning(f"Order {order_number} has no line items, skipping backup shipping note")
+        return jsonify({"status": "success", "message": "No line items, skipped"}), 200
+
     sku_by_vendor = group_skus_by_vendor(line_items)
+    if not sku_by_vendor:
+        logger.warning(f"Order {order_number} has no valid vendors, skipping backup shipping note")
+        return jsonify({"status": "success", "message": "No valid vendors, skipped"}), 200
+
+    # Check for existing order to prevent duplicates
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
+    ).execute()
+    values = result.get('values', [])
+    for row in values:
+        if len(row) > 4 and row[1].lstrip("#") == order_number:
+            vendor = row[4] if len(row) > 4 else ""
+            if vendor in sku_by_vendor:
+                logger.info(f"Order {order_number} with vendor {vendor} already exists, skipping backup shipping note")
+                return jsonify({"status": "success", "message": "Order already exists, skipped"}), 200
+
     rows_data = [
         [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", backup_note, ""]
         for vendor, skus in sku_by_vendor.items()
@@ -416,41 +452,112 @@ def apply_formulas():
         ).execute()
 
 def delete_rows():
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
-    ).execute()
-    values = result.get('values', [])
-    rows_to_clear = []
-
-    for i, row in enumerate(values):
-        sku_cell = row[3] if len(row) > 3 else ''
-        if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:N{i+1}')
-
-    for row_range in rows_to_clear:
-        service.spreadsheets().values().clear(
-            spreadsheetId=SPREADSHEET_ID, range=row_range
+    """Delete rows with specific SKUs or completely empty rows."""
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
+        values = result.get('values', [])
+        if not values:
+            logger.info("No rows to process for deletion")
+            return
+
+        rows_to_delete = []
+        for i, row in enumerate(values):
+            # Check for completely empty rows or rows with only whitespace
+            if not row or all(cell.strip() == "" for cell in row):
+                rows_to_delete.append(i)
+                logger.info(f"Marked empty row {i+1} for deletion")
+                continue
+            # Check for specific SKUs or empty SKU cell
+            sku_cell = row[3] if len(row) > 3 else ""
+            if sku_cell in ["Tip", "MLP-AIR-FRESHENER", ""]:
+                rows_to_delete.append(i)
+                logger.info(f"Marked row {i+1} with SKU {sku_cell} for deletion")
+
+        if rows_to_delete:
+            rows_to_delete.sort(reverse=True)  # Delete from bottom to top
+            request_body = {
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": get_sheet_id(),
+                                "dimension": "ROWS",
+                                "startIndex": i,
+                                "endIndex": i + 1
+                            }
+                        }
+                    }
+                    for i in rows_to_delete
+                ]
+            }
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body=request_body
+            ).execute()
+            logger.info(f"Deleted {len(rows_to_delete)} rows (empty or specific SKUs)")
+        else:
+            logger.info("No rows to delete")
+    except Exception as e:
+        logger.error(f"Error deleting rows: {str(e)}")
 
 def delete_duplicate_rows():
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
-    ).execute()
-    values = result.get('values', [])
-    unique_rows = {}
-    rows_to_clear = []
-
-    for i, row in enumerate(values):
-        row_str = ','.join(map(str, row))
-        if row_str in unique_rows:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:N{i+1}')
-        else:
-            unique_rows[row_str] = True
-
-    for row_range in rows_to_clear:
-        service.spreadsheets().values().clear(
-            spreadsheetId=SPREADSHEET_ID, range=row_range
+    """Delete duplicate rows based on order_number, vendor, and SKUs."""
+    try:
+        # Fetch all rows
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
+        values = result.get('values', [])
+        if not values:
+            logger.info("No rows to process for duplicates")
+            return
+
+        # Track unique rows and rows to delete
+        seen = {}  # Key: (order_number, vendor, skus), Value: row index
+        rows_to_delete = []
+
+        for i, row in enumerate(values):
+            if len(row) < 5:  # Skip rows with insufficient data
+                continue
+            order_number = row[1].lstrip("#") if len(row) > 1 else ""
+            vendor = row[4] if len(row) > 4 else ""
+            skus = row[3] if len(row) > 3 else ""
+            key = (order_number, vendor, skus)
+
+            if key in seen:
+                rows_to_delete.append(i)
+                logger.info(f"Found duplicate row {i+1} for order {order_number}, vendor {vendor}, SKUs {skus}")
+            else:
+                seen[key] = i
+
+        if rows_to_delete:
+            rows_to_delete.sort(reverse=True)  # Delete from bottom to top
+            request_body = {
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": get_sheet_id(),
+                                "dimension": "ROWS",
+                                "startIndex": i,
+                                "endIndex": i + 1
+                            }
+                        }
+                    }
+                    for i in rows_to_delete
+                ]
+            }
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body=request_body
+            ).execute()
+            logger.info(f"Deleted {len(rows_to_delete)} duplicate rows")
+        else:
+            logger.info("No duplicate rows found")
+    except Exception as e:
+        logger.error(f"Error deleting duplicate rows: {str(e)}")
 
 @app.route('/', methods=['GET'])
 def health_check():
