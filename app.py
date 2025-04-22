@@ -263,7 +263,7 @@ def process_queue():
         return
 
     updated_queue = []
-    max_orders = 5  # Limit to avoid Render timeout
+    max_orders = 2  # Limit to avoid Render timeout
     processed = 0
 
     for order in queue:
