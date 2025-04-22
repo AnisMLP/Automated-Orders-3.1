@@ -234,7 +234,7 @@ def process_order(data):
             return False
 
         logger.info(f"Applying formulas for order {order_number}")
-        apply_formulas(start_row, len(rows_data))  # Pass start_row and number of rows
+        apply_formulas()  # Call without arguments
         logger.info(f"Deleting rows for order {order_number}")
         delete_rows()
         logger.info(f"Deleting duplicates for order {order_number}")
@@ -263,7 +263,7 @@ def process_queue():
         return
 
     updated_queue = []
-    max_orders = 5  # Limit to avoid Render timeout
+    max_orders = 1  # Reduced to avoid timeouts
     processed = 0
 
     for order in queue:
@@ -442,7 +442,7 @@ def add_backup_shipping_note(data):
             logger.error(f"Failed to write backup note for order {order_number} after 3 attempts")
             return jsonify({"status": "error", "message": "Failed to write backup note"}), 500
 
-        apply_formulas()
+        apply_formulas()  # Call without arguments
         delete_rows()
         delete_duplicate_rows()
 
@@ -566,55 +566,46 @@ def remove_fulfilled_sku(data):
     finally:
         release_lock(lock_fd, SHEET_LOCK_FILE)
 
-def apply_formulas(start_row, num_rows):
-    """Apply formulas to columns G and I for the specified rows in the Google Sheet."""
+def apply_formulas():
+    """Apply formulas to columns G and I for all rows in the Google Sheet."""
     lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
-        end_row = start_row + num_rows - 1
-        logger.info(f"Applying formulas to columns G and I for rows {start_row} to {end_row}")
+        logger.info("Applying formulas to columns G and I")
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
+        ).execute()
+        values = result.get('values', [])
+        last_row = len(values) + 1 if values else 2
 
-        # Generate formulas for columns G and I
-        formulas = []
-        for row in range(start_row, end_row + 1):
+        assign_type_formulas = []
+        pic_formulas = []
+        for row in range(2, last_row + 1):
             assign_type_formula = (
-                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
-                f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
+                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D2:D500,assign_types!E2:E500),'
+                f'XLOOKUP(E{row},assign_types!A2:A500,assign_types!B2:B500)),XLOOKUP(E{row},assign_types!A2:A500,assign_types!B2:B500)),"")'
             )
             pic_formula = (
-                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
-                f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
+                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E2:E500,assign_types!F2:F500),'
+                f'XLOOKUP(E{row},assign_types!A2:A500,assign_types!C2:C500)),XLOOKUP(E{row},assign_types!A2:A500,assign_types!C2:C500)),"")'
             )
-            # Include formulas for G and I, with empty string for H
-            formulas.append([assign_type_formula, "", pic_formula])
+            assign_type_formulas.append([assign_type_formula])
+            pic_formulas.append([pic_formula])
 
-        if formulas:
-            # Write formulas to columns G and I only
-            range_to_write = f'{SHEET_NAME}!G{start_row}:I{end_row}'
-            for attempt in range(3):
-                try:
-                    service.spreadsheets().values().update(
-                        spreadsheetId=SPREADSHEET_ID,
-                        range=range_to_write,
-                        valueInputOption='USER_ENTERED',
-                        body={'values': formulas}
-                    ).execute()
-                    logger.info(f"Successfully applied formulas to columns G and I for rows {start_row} to {end_row}")
-                    break
-                except HttpError as e:
-                    if e.resp.status in [429, 503]:
-                        logger.warning(f"Rate limit or service error applying formulas, attempt {attempt+1}: {str(e)}")
-                        time.sleep(2 ** attempt)
-                    else:
-                        logger.error(f"Error applying formulas: {str(e)}")
-                        raise
-                except Exception as e:
-                    logger.error(f"Unexpected error applying formulas: {str(e)}")
-                    raise
-            else:
-                logger.error(f"Failed to apply formulas after 3 attempts")
-                raise Exception("Failed to apply formulas")
+        if assign_type_formulas:
+            service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
+                valueInputOption='USER_ENTERED', body={'values': assign_type_formulas}
+            ).execute()
+
+        if pic_formulas:
+            service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',
+                valueInputOption='USER_ENTERED', body={'values': pic_formulas}
+            ).execute()
+
+        logger.info(f"Successfully applied formulas to G2:G{last_row} and I2:I{last_row}")
     except Exception as e:
-        logger.error(f"Error in apply_formulas for rows {start_row} to {end_row}: {str(e)}")
+        logger.error(f"Error in apply_formulas: {str(e)}")
         raise
     finally:
         release_lock(lock_fd, SHEET_LOCK_FILE)
