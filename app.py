@@ -567,14 +567,14 @@ def remove_fulfilled_sku(data):
         release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def apply_formulas(start_row, num_rows):
-    """Apply formulas to the specified rows in the Google Sheet."""
+    """Apply formulas to columns G and I for the specified rows in the Google Sheet."""
     lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         end_row = start_row + num_rows - 1
-        logger.info(f"Applying formulas to rows {start_row} to {end_row}")
+        logger.info(f"Applying formulas to columns G and I for rows {start_row} to {end_row}")
 
-        # Generate formulas for the new rows only
-        formula_data = []
+        # Generate formulas for columns G and I
+        formulas = []
         for row in range(start_row, end_row + 1):
             assign_type_formula = (
                 f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
@@ -584,20 +584,21 @@ def apply_formulas(start_row, num_rows):
                 f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
                 f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
             )
-            # Combine formulas for columns G and I in a single row
-            formula_data.append(["", "", "", "", "", "", assign_type_formula, "", pic_formula, "", "", "", "", ""])
+            # Include formulas for G and I, with empty string for H
+            formulas.append([assign_type_formula, "", pic_formula])
 
-        if formula_data:
-            range_to_write = f'{SHEET_NAME}!A{start_row}:N{end_row}'
+        if formulas:
+            # Write formulas to columns G and I only
+            range_to_write = f'{SHEET_NAME}!G{start_row}:I{end_row}'
             for attempt in range(3):
                 try:
                     service.spreadsheets().values().update(
                         spreadsheetId=SPREADSHEET_ID,
                         range=range_to_write,
                         valueInputOption='USER_ENTERED',
-                        body={'values': formula_data}
+                        body={'values': formulas}
                     ).execute()
-                    logger.info(f"Successfully applied formulas to rows {start_row} to {end_row}")
+                    logger.info(f"Successfully applied formulas to columns G and I for rows {start_row} to {end_row}")
                     break
                 except HttpError as e:
                     if e.resp.status in [429, 503]:
