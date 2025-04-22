@@ -567,6 +567,7 @@ def remove_fulfilled_sku(data):
         release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def apply_formulas():
+    # for PIC and Assign type
     lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         result = service.spreadsheets().values().get(
