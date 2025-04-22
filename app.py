@@ -233,8 +233,8 @@ def process_order(data):
             logger.error(f"Failed to write order {order_number} to sheet after 3 attempts")
             return False
 
-        logger.info(f"Applying formulas for order {order_number}")
-        apply_formulas()
+        logger.info(f"Applying formulas for order {order_number} at rows {start_row}:{start_row + len(rows_data) - 1}")
+        apply_formulas(start_row, len(rows_data))
         logger.info(f"Deleting rows for order {order_number}")
         delete_rows()
         logger.info(f"Deleting duplicates for order {order_number}")
@@ -250,7 +250,7 @@ def process_order(data):
         logger.info(f"Successfully processed order {order_number} to Google Sheets")
         return True
     except Exception as e:
-        logger.error(f"Error processing order {data.get('order_number', 'Unknown')}: {str(e)}")
+        logger.error(f"Error processing order {order_number}: {str(e)}")
         return False
     finally:
         release_lock(lock_fd, SHEET_LOCK_FILE)
@@ -263,7 +263,7 @@ def process_queue():
         return
 
     updated_queue = []
-    max_orders = 2  # Limit to avoid Render timeout
+    max_orders = 1  # Limit to avoid Render timeout
     processed = 0
 
     for order in queue:
@@ -315,6 +315,13 @@ def handle_webhook():
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
         order_number = data.get("order_number", "Unknown")
+        # Stricter validation for line items
+        if not data.get("line_items") or not any(item.get("sku") and item.get("vendor") for item in data.get("line_items", [])):
+            logger.error(f"Order {order_number} has invalid line items, queuing with error")
+            queue.append({"error": "Invalid line items", "order_number": order_number, "raw_data": raw_data.decode('utf-8')})
+            save_queue(queue)
+            return jsonify({"status": "queued", "message": f"Order {order_number} queued with error: Invalid line items"}), 200
+
         # Check for duplicate in queue
         if any(order.get("order_number") == order_number for order in queue):
             logger.info(f"Duplicate order {order_number} detected in queue, skipping")
@@ -364,6 +371,50 @@ def clear_queue():
     save_queue([])
     logger.info("Queue cleared")
     return jsonify({"status": "success", "message": "Queue cleared"}), 200
+
+@app.route('/check_empty_rows', methods=['POST'])
+def check_empty_rows():
+    provided_key = request.args.get('key')
+    if provided_key != SECRET_KEY:
+        return jsonify({"error": "Access Denied"}), 403
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
+        ).execute()
+        values = result.get('values', [])
+        rows_to_delete = []
+        for i, row in enumerate(values):
+            if not row or all(cell.strip() == "" for cell in row):
+                rows_to_delete.append(i)
+                logger.info(f"Found empty row {i+1}, marking for deletion")
+        if rows_to_delete:
+            rows_to_delete.sort(reverse=True)
+            request_body = {
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": get_sheet_id(),
+                                "dimension": "ROWS",
+                                "startIndex": i,
+                                "endIndex": i + 1
+                            }
+                        }
+                    }
+                    for i in rows_to_delete
+                ]
+            }
+            service.spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body=request_body).execute()
+            logger.info(f"Deleted {len(rows_to_delete)} empty rows")
+        else:
+            logger.info("No empty rows found")
+        return jsonify({"status": "success", "message": f"Checked and deleted {len(rows_to_delete)} empty rows"}), 200
+    except Exception as e:
+        logger.error(f"Error checking empty rows: {str(e)}")
+        return jsonify({"status": "error", "message": f"Failed to check empty rows: {str(e)}"}), 500
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def add_backup_shipping_note(data):
     lock_fd = acquire_lock(SHEET_LOCK_FILE)
@@ -442,8 +493,11 @@ def add_backup_shipping_note(data):
             logger.error(f"Failed to write backup note for order {order_number} after 3 attempts")
             return jsonify({"status": "error", "message": "Failed to write backup note"}), 500
 
-        apply_formulas()
+        logger.info(f"Applying formulas for order {order_number} at rows {start_row}:{start_row + len(rows_data) - 1}")
+        apply_formulas(start_row, len(rows_data))
+        logger.info(f"Deleting rows for order {order_number}")
         delete_rows()
+        logger.info(f"Deleting duplicates for order {order_number}")
         delete_duplicate_rows()
 
         return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
@@ -566,19 +620,14 @@ def remove_fulfilled_sku(data):
     finally:
         release_lock(lock_fd, SHEET_LOCK_FILE)
 
-def apply_formulas():
-    # for PIC and Assign type
+def apply_formulas(start_row, num_rows):
+    """Apply formulas only to the specified range of new rows."""
     lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
-        ).execute()
-        values = result.get('values', [])
-        last_row = len(values) + 1 if values else 2
-
+        logger.info(f"Applying formulas to rows {start_row}:{start_row + num_rows - 1}")
         assign_type_formulas = []
         pic_formulas = []
-        for row in range(2, last_row + 1):
+        for row in range(start_row, start_row + num_rows):
             assign_type_formula = (
                 f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
                 f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
@@ -594,9 +643,12 @@ def apply_formulas():
             for attempt in range(3):
                 try:
                     service.spreadsheets().values().update(
-                        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
-                        valueInputOption='USER_ENTERED', body={'values': assign_type_formulas}
+                        spreadsheetId=SPREADSHEET_ID,
+                        range=f'{SHEET_NAME}!G{start_row}:G{start_row + num_rows - 1}',
+                        valueInputOption='USER_ENTERED',
+                        body={'values': assign_type_formulas}
                     ).execute()
+                    logger.info(f"Applied assign type formulas to G{start_row}:G{start_row + num_rows - 1}")
                     break
                 except HttpError as e:
                     if e.resp.status in [429, 503]:
@@ -616,9 +668,12 @@ def apply_formulas():
             for attempt in range(3):
                 try:
                     service.spreadsheets().values().update(
-                        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',
-                        valueInputOption='USER_ENTERED', body={'values': pic_formulas}
+                        spreadsheetId=SPREADSHEET_ID,
+                        range=f'{SHEET_NAME}!I{start_row}:I{start_row + num_rows - 1}',
+                        valueInputOption='USER_ENTERED',
+                        body={'values': pic_formulas}
                     ).execute()
+                    logger.info(f"Applied pic formulas to I{start_row}:I{start_row + num_rows - 1}")
                     break
                 except HttpError as e:
                     if e.resp.status in [429, 503]:
