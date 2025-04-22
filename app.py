@@ -234,7 +234,7 @@ def process_order(data):
             return False
 
         logger.info(f"Applying formulas for order {order_number}")
-        apply_formulas()  # Call without arguments
+        apply_formulas(start_row, len(rows_data))  # Pass start_row and num_rows
         logger.info(f"Deleting rows for order {order_number}")
         delete_rows()
         logger.info(f"Deleting duplicates for order {order_number}")
@@ -263,7 +263,7 @@ def process_queue():
         return
 
     updated_queue = []
-    max_orders = 1  # Reduced to avoid timeouts
+    max_orders = 1  # Process one order at a time
     processed = 0
 
     for order in queue:
@@ -442,7 +442,7 @@ def add_backup_shipping_note(data):
             logger.error(f"Failed to write backup note for order {order_number} after 3 attempts")
             return jsonify({"status": "error", "message": "Failed to write backup note"}), 500
 
-        apply_formulas()  # Call without arguments
+        apply_formulas(start_row, len(rows_data))  # Pass start_row and num_rows
         delete_rows()
         delete_duplicate_rows()
 
@@ -566,20 +566,14 @@ def remove_fulfilled_sku(data):
     finally:
         release_lock(lock_fd, SHEET_LOCK_FILE)
 
-def apply_formulas():
-    """Apply formulas to columns G and I for all rows in the Google Sheet."""
+def apply_formulas(start_row, num_rows):
+    """Apply formulas to columns G and I for new rows."""
     lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
-        logger.info("Applying formulas to columns G and I")
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
-        ).execute()
-        values = result.get('values', [])
-        last_row = len(values) + 1 if values else 2
-
-        assign_type_formulas = []
-        pic_formulas = []
-        for row in range(2, last_row + 1):
+        logger.info(f"Applying formulas to G{start_row}:I{start_row + num_rows - 1}")
+        end_row = start_row + num_rows - 1
+        formulas = []
+        for row in range(start_row, end_row + 1):
             assign_type_formula = (
                 f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D2:D500,assign_types!E2:E500),'
                 f'XLOOKUP(E{row},assign_types!A2:A500,assign_types!B2:B500)),XLOOKUP(E{row},assign_types!A2:A500,assign_types!B2:B500)),"")'
@@ -588,22 +582,14 @@ def apply_formulas():
                 f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E2:E500,assign_types!F2:F500),'
                 f'XLOOKUP(E{row},assign_types!A2:A500,assign_types!C2:C500)),XLOOKUP(E{row},assign_types!A2:A500,assign_types!C2:C500)),"")'
             )
-            assign_type_formulas.append([assign_type_formula])
-            pic_formulas.append([pic_formula])
+            formulas.append([assign_type_formula, "", pic_formula])
 
-        if assign_type_formulas:
+        if formulas:
             service.spreadsheets().values().update(
-                spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
-                valueInputOption='USER_ENTERED', body={'values': assign_type_formulas}
+                spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G{start_row}:I{end_row}',
+                valueInputOption='USER_ENTERED', body={'values': formulas}
             ).execute()
-
-        if pic_formulas:
-            service.spreadsheets().values().update(
-                spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',
-                valueInputOption='USER_ENTERED', body={'values': pic_formulas}
-            ).execute()
-
-        logger.info(f"Successfully applied formulas to G2:G{last_row} and I2:I{last_row}")
+        logger.info(f"Applied formulas to G{start_row}:I{end_row}")
     except Exception as e:
         logger.error(f"Error in apply_formulas: {str(e)}")
         raise
