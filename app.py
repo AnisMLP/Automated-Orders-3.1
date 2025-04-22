@@ -1,4 +1,3 @@
-```python
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -11,8 +10,6 @@ import time
 import re
 import fcntl
 from googleapiclient.errors import HttpError
-from rq import Queue
-from redis import Redis
 
 load_dotenv()
 app = Flask(__name__)
@@ -48,13 +45,6 @@ except Exception as e:
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
 QUEUE_LOCK_FILE = '/tmp/queue.lock' if IS_RENDER else 'queue.lock'
 SHEET_LOCK_FILE = '/tmp/sheet.lock' if IS_RENDER else 'sheet.lock'
-
-# RQ setup
-redis_conn = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
-rq_queue = Queue(connection=redis_conn)
-
-# Cache for sheet ID
-SHEET_ID_CACHE = None
 
 def acquire_lock(lock_file):
     """Acquire a file lock."""
@@ -149,77 +139,17 @@ def get_last_row():
 
 def get_sheet_id():
     """Helper function to get the sheet ID for the SHEET_NAME."""
-    global SHEET_ID_CACHE
-    if SHEET_ID_CACHE is not None:
-        return SHEET_ID_CACHE
     try:
         spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
         for sheet in spreadsheet['sheets']:
             if sheet['properties']['title'] == SHEET_NAME:
-                SHEET_ID_CACHE = sheet['properties']['sheetId']
-                logger.info(f"Retrieved and cached sheet ID {SHEET_ID_CACHE} for sheet {SHEET_NAME}")
-                return SHEET_ID_CACHE
+                sheet_id = sheet['properties']['sheetId']
+                logger.info(f"Retrieved sheet ID {sheet_id} for sheet {SHEET_NAME}")
+                return sheet_id
         raise ValueError(f"Sheet {SHEET_NAME} not found")
     except Exception as e:
         logger.error(f"Error getting sheet ID: {str(e)}")
         raise
-
-def apply_formulas(start_row, num_rows):
-    """Apply formulas to the specified rows in the Google Sheet."""
-    lock_fd = acquire_lock(SHEET_LOCK_FILE)
-    start_time = time.time()
-    try:
-        end_row = start_row + num_rows - 1
-        logger.info(f"Applying formulas to rows {start_row} to {end_row}")
-
-        # Generate formulas for the new rows only
-        formula_data = []
-        for row in range(start_row, end_row + 1):
-            assign_type_formula = (
-                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
-                f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
-            )
-            pic_formula = (
-                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
-                f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
-            )
-            formula_data.append(["", "", "", "", "", "", assign_type_formula, "", pic_formula, "", "", "", "", ""])
-
-        if formula_data:
-            range_to_write = f'{SHEET_NAME}!A{start_row}:N{end_row}'
-            for attempt in range(3):
-                elapsed_time = time.time() - start_time
-                if elapsed_time > 25:  # Buffer for cleanup
-                    logger.error(f"Timeout approaching in apply_formulas after {elapsed_time:.2f}s")
-                    raise TimeoutError("Operation aborted to avoid worker timeout")
-                
-                try:
-                    service.spreadsheets().values().update(
-                        spreadsheetId=SPREADSHEET_ID,
-                        range=range_to_write,
-                        valueInputOption='USER_ENTERED',
-                        body={'values': formula_data}
-                    ).execute()
-                    logger.info(f"Successfully applied formulas to rows {start_row} to {end_row} in {time.time() - start_time:.2f}s")
-                    break
-                except HttpError as e:
-                    if e.resp.status in [429, 503]:
-                        logger.warning(f"Rate limit or service error applying formulas, attempt {attempt+1}: {str(e)}")
-                        time.sleep(1)  # Reduced delay
-                    else:
-                        logger.error(f"Error applying formulas: {str(e)}")
-                        raise
-                except Exception as e:
-                    logger.error(f"Unexpected error applying formulas: {str(e)}")
-                    raise
-            else:
-                logger.error(f"Failed to apply formulas after 3 attempts")
-                raise Exception("Failed to apply formulas")
-    except Exception as e:
-        logger.error(f"Error in apply_formulas for rows {start_row} to {end_row}: {str(e)}")
-        raise
-    finally:
-        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def process_order(data):
     """Process a single order and write to Google Sheets with duplicate checking."""
@@ -255,7 +185,7 @@ def process_order(data):
             except HttpError as e:
                 if e.resp.status in [429, 503]:
                     logger.warning(f"Rate limit or service error reading sheet, attempt {attempt+1}: {str(e)}")
-                    time.sleep(1)
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Error reading sheet for duplicate check: {str(e)}")
                     raise
@@ -273,39 +203,26 @@ def process_order(data):
                     logger.info(f"Order {order_number} with vendor {vendor} already exists in sheet, skipping")
                     return True
 
-        # Combine data and formulas in one write
-        start_row = get_last_row()
         rows_data = [
             [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "", ""]
             for vendor, skus in sku_by_vendor.items()
         ]
-        for i, row in enumerate(rows_data):
-            row_idx = start_row + i
-            assign_type_formula = (
-                f'=IFNA(IF(F{row_idx}="US",IFNA(XLOOKUP(E{row_idx},assign_types!D:D,assign_types!E:E),'
-                f'XLOOKUP(E{row_idx},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row_idx},assign_types!A:A,assign_types!B:B)),"")'
-            )
-            pic_formula = (
-                f'=IFNA(IF(F{row_idx}="US",IFNA(XLOOKUP(E{row_idx},assign_types!E:E,assign_types!F:F),'
-                f'XLOOKUP(E{row_idx},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row_idx},assign_types!A:A,assign_types!C:C)),"")'
-            )
-            row[6] = assign_type_formula
-            row[8] = pic_formula
 
-        range_to_write = f'{SHEET_NAME}!A{start_row}:N{start_row + len(rows_data) - 1}'
+        start_row = get_last_row()
+        range_to_write = f'{SHEET_NAME}!A{start_row}'
         body = {'values': rows_data}
-        logger.info(f"Writing order {order_number} with formulas to Google Sheets at {range_to_write}")
+        logger.info(f"Writing order {order_number} to Google Sheets at {range_to_write}")
         for attempt in range(3):
             try:
                 result = service.spreadsheets().values().update(
                     spreadsheetId=SPREADSHEET_ID, range=range_to_write,
-                    valueInputOption='USER_ENTERED', body=body
+                    valueInputOption='RAW', body=body
                 ).execute()
                 break
             except HttpError as e:
                 if e.resp.status in [429, 503]:
                     logger.warning(f"Rate limit or service error writing sheet, attempt {attempt+1}: {str(e)}")
-                    time.sleep(1)
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Error writing order {order_number} to sheet: {str(e)}")
                     raise
@@ -316,6 +233,8 @@ def process_order(data):
             logger.error(f"Failed to write order {order_number} to sheet after 3 attempts")
             return False
 
+        logger.info(f"Applying formulas for order {order_number}")
+        apply_formulas(start_row, len(rows_data))  # Pass start_row and number of rows
         logger.info(f"Deleting rows for order {order_number}")
         delete_rows()
         logger.info(f"Deleting duplicates for order {order_number}")
@@ -330,11 +249,8 @@ def process_order(data):
 
         logger.info(f"Successfully processed order {order_number} to Google Sheets")
         return True
-    except TimeoutError as e:
-        logger.error(f"Timeout processing order {order_number}: {str(e)}")
-        return False
     except Exception as e:
-        logger.error(f"Error processing order {order_number}: {str(e)}")
+        logger.error(f"Error processing order {data.get('order_number', 'Unknown')}: {str(e)}")
         return False
     finally:
         release_lock(lock_fd, SHEET_LOCK_FILE)
@@ -347,7 +263,7 @@ def process_queue():
         return
 
     updated_queue = []
-    max_orders = 2  # Reduced to minimize processing time
+    max_orders = 5  # Limit to avoid Render timeout
     processed = 0
 
     for order in queue:
@@ -399,6 +315,7 @@ def handle_webhook():
             return jsonify({"status": "queued", "message": "Order queued with error: No valid JSON data"}), 200
 
         order_number = data.get("order_number", "Unknown")
+        # Check for duplicate in queue
         if any(order.get("order_number") == order_number for order in queue):
             logger.info(f"Duplicate order {order_number} detected in queue, skipping")
             return jsonify({"status": "success", "message": "Duplicate order ignored"}), 200
@@ -410,8 +327,8 @@ def handle_webhook():
             queue.append(data)
             save_queue(queue)
             logger.info(f"Order {order_number} added to queue. Queue size: {len(queue)}")
-            rq_queue.enqueue(process_queue)
-            return jsonify({"status": "queued", "message": f"Order {order_number} added to queue for processing"}), 200
+            process_queue()
+            return jsonify({"status": "queued", "message": f"Order {order_number} added to queue"}), 200
         elif action == 'removeFulfilledSKU':
             return remove_fulfilled_sku(data)
         else:
@@ -478,7 +395,7 @@ def add_backup_shipping_note(data):
             except HttpError as e:
                 if e.resp.status in [429, 503]:
                     logger.warning(f"Rate limit or service error reading sheet, attempt {attempt+1}: {str(e)}")
-                    time.sleep(1)
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Error reading sheet for duplicate check: {str(e)}")
                     raise
@@ -496,39 +413,25 @@ def add_backup_shipping_note(data):
                     logger.info(f"Order {order_number} with vendor {vendor} already exists, skipping backup shipping note")
                     return jsonify({"status": "success", "message": "Order already exists, skipped"}), 200
 
-        # Combine data and formulas
-        start_row = get_last_row()
         rows_data = [
             [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", backup_note, ""]
             for vendor, skus in sku_by_vendor.items()
         ]
-        for i, row in enumerate(rows_data):
-            row_idx = start_row + i
-            assign_type_formula = (
-                f'=IFNA(IF(F{row_idx}="US",IFNA(XLOOKUP(E{row_idx},assign_types!D:D,assign_types!E:E),'
-                f'XLOOKUP(E{row_idx},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row_idx},assign_types!A:A,assign_types!B:B)),"")'
-            )
-            pic_formula = (
-                f'=IFNA(IF(F{row_idx}="US",IFNA(XLOOKUP(E{row_idx},assign_types!E:E,assign_types!F:F),'
-                f'XLOOKUP(E{row_idx},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row_idx},assign_types!A:A,assign_types!C:C)),"")'
-            )
-            row[6] = assign_type_formula
-            row[8] = pic_formula
 
+        start_row = get_last_row()
         range_to_write = f'{SHEET_NAME}!A{start_row}:N{start_row + len(rows_data) - 1}'
         body = {'values': rows_data}
-        logger.info(f"Writing backup note for order {order_number} with formulas to Google Sheets at {range_to_write}")
         for attempt in range(3):
             try:
                 result = service.spreadsheets().values().update(
                     spreadsheetId=SPREADSHEET_ID, range=range_to_write,
-                    valueInputOption='USER_ENTERED', body=body
+                    valueInputOption='RAW', body=body
                 ).execute()
                 break
             except HttpError as e:
                 if e.resp.status in [429, 503]:
                     logger.warning(f"Rate limit or service error writing sheet, attempt {attempt+1}: {str(e)}")
-                    time.sleep(1)
+                    time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Error writing backup note for order {order_number}: {str(e)}")
                     raise
@@ -539,9 +442,8 @@ def add_backup_shipping_note(data):
             logger.error(f"Failed to write backup note for order {order_number} after 3 attempts")
             return jsonify({"status": "error", "message": "Failed to write backup note"}), 500
 
-        logger.info(f"Deleting rows for order {order_number}")
+        apply_formulas()
         delete_rows()
-        logger.info(f"Deleting duplicates for order {order_number}")
         delete_duplicate_rows()
 
         return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
@@ -619,7 +521,7 @@ def remove_fulfilled_sku(data):
                 except HttpError as e:
                     if e.resp.status in [429, 503]:
                         logger.warning(f"Rate limit or service error deleting rows, attempt {attempt+1}: {str(e)}")
-                        time.sleep(1)
+                        time.sleep(2 ** attempt)
                     else:
                         logger.error(f"Error deleting rows for order {order_number}: {str(e)}")
                         raise
@@ -642,7 +544,7 @@ def remove_fulfilled_sku(data):
                 except HttpError as e:
                     if e.resp.status in [429, 503]:
                         logger.warning(f"Rate limit or service error updating row, attempt {attempt+1}: {str(e)}")
-                        time.sleep(1)
+                        time.sleep(2 ** attempt)
                     else:
                         logger.error(f"Error updating row {i+1}: {str(e)}")
                         raise
@@ -661,6 +563,58 @@ def remove_fulfilled_sku(data):
     except Exception as e:
         logger.error(f"Error in remove_fulfilled_sku for order {order_number}: {str(e)}")
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
+
+def apply_formulas(start_row, num_rows):
+    """Apply formulas to the specified rows in the Google Sheet."""
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
+    try:
+        end_row = start_row + num_rows - 1
+        logger.info(f"Applying formulas to rows {start_row} to {end_row}")
+
+        # Generate formulas for the new rows only
+        formula_data = []
+        for row in range(start_row, end_row + 1):
+            assign_type_formula = (
+                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
+                f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
+            )
+            pic_formula = (
+                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
+                f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
+            )
+            # Combine formulas for columns G and I in a single row
+            formula_data.append(["", "", "", "", "", "", assign_type_formula, "", pic_formula, "", "", "", "", ""])
+
+        if formula_data:
+            range_to_write = f'{SHEET_NAME}!A{start_row}:N{end_row}'
+            for attempt in range(3):
+                try:
+                    service.spreadsheets().values().update(
+                        spreadsheetId=SPREADSHEET_ID,
+                        range=range_to_write,
+                        valueInputOption='USER_ENTERED',
+                        body={'values': formula_data}
+                    ).execute()
+                    logger.info(f"Successfully applied formulas to rows {start_row} to {end_row}")
+                    break
+                except HttpError as e:
+                    if e.resp.status in [429, 503]:
+                        logger.warning(f"Rate limit or service error applying formulas, attempt {attempt+1}: {str(e)}")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Error applying formulas: {str(e)}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Unexpected error applying formulas: {str(e)}")
+                    raise
+            else:
+                logger.error(f"Failed to apply formulas after 3 attempts")
+                raise Exception("Failed to apply formulas")
+    except Exception as e:
+        logger.error(f"Error in apply_formulas for rows {start_row} to {end_row}: {str(e)}")
+        raise
     finally:
         release_lock(lock_fd, SHEET_LOCK_FILE)
 
@@ -717,7 +671,7 @@ def delete_rows():
                     except HttpError as e:
                         if e.resp.status in [429, 503]:
                             logger.warning(f"Rate limit or service error deleting rows, attempt {attempt+1}: {str(e)}")
-                            time.sleep(1)
+                            time.sleep(2 ** attempt)
                         else:
                             logger.error(f"Error deleting batch of rows: {str(e)}")
                             raise
@@ -794,7 +748,7 @@ def delete_duplicate_rows():
                     except HttpError as e:
                         if e.resp.status in [429, 503]:
                             logger.warning(f"Rate limit or service error deleting duplicates, attempt {attempt+1}: {str(e)}")
-                            time.sleep(1)
+                            time.sleep(2 ** attempt)
                         else:
                             logger.error(f"Error deleting batch of duplicate rows: {str(e)}")
                             raise
