@@ -110,13 +110,13 @@ def get_last_row():
         logger.error(f"Error getting last row: {str(e)}")
         return 1
 
-def update_sheet_with_retry(range_to_write, body, max_attempts=3):
+def update_sheet_with_retry(range_to_write, body, max_attempts=3, valueInputOption='RAW'):
     """Update Google Sheets with retry logic."""
     for attempt in range(max_attempts):
         try:
             return service.spreadsheets().values().update(
                 spreadsheetId=SPREADSHEET_ID, range=range_to_write,
-                valueInputOption='RAW', body=body
+                valueInputOption=valueInputOption, body=body
             ).execute()
         except Exception as e:
             logger.error(f"Attempt {attempt + 1} failed for range {range_to_write}: {str(e)}")
@@ -133,6 +133,19 @@ def process_order(data):
     try:
         order_number = data.get("order_number", "Unknown")
         logger.info(f"Processing order {order_number} with data: {json.dumps(data, indent=2)}")
+        
+        # Check for duplicate order number in column B
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!B:B'
+        ).execute()
+        order_numbers = result.get('values', [])
+        # Flatten the list and remove empty values
+        order_numbers = [row[0] for row in order_numbers if row and row[0]]
+        
+        if str(order_number) in order_numbers:
+            logger.warning(f"Duplicate order number {order_number} found in column B, skipping processing")
+            return True  # Return True to indicate the order was handled (skipped)
+
         order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
         order_country = data.get("order_country", "Unknown")
         order_created = format_date(data.get("order_created", ""))
@@ -291,6 +304,18 @@ def view_failed_orders():
 def add_backup_shipping_note(data):
     """Add order with backup shipping note to Google Sheets."""
     order_number = data.get("order_number")
+    
+    # Check for duplicate order number in column B
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!B:B'
+    ).execute()
+    order_numbers = result.get('values', [])
+    order_numbers = [row[0] for row in order_numbers if row and row[0]]
+    
+    if str(order_number) in order_numbers:
+        logger.warning(f"Duplicate order number {order_number} found in column B, skipping processing")
+        return jsonify({"status": "skipped", "message": f"Order {order_number} is a duplicate"}), 200
+
     order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
     order_country = data.get("order_country")
     backup_note = data.get("backup_shipping_note")
