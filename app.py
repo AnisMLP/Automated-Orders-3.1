@@ -150,7 +150,6 @@ def process_order(data):
     if not service:
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
-    lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         order_number = data.get("order_number", "Unknown")
         logger.info(f"Processing order {order_number} with data: {json.dumps(data, indent=2)}")
@@ -197,8 +196,6 @@ def process_order(data):
     except Exception as e:
         logger.error(f"Error processing order {order_number}: {str(e)}")
         return False
-    finally:
-        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def process_queue():
     """Process all valid orders in the queue, moving failed orders to failed_orders.json."""
@@ -326,7 +323,6 @@ def view_failed_orders():
 
 def add_backup_shipping_note(data):
     """Add order with backup shipping note to Google Sheets."""
-    lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         order_number = data.get("order_number")
         
@@ -366,12 +362,9 @@ def add_backup_shipping_note(data):
     except Exception as e:
         logger.error(f"Error in add_backup_shipping_note for order {order_number}: {str(e)}")
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
-    finally:
-        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def remove_fulfilled_sku(data):
     """Remove fulfilled SKUs from the Sheet."""
-    lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         order_number = data.get("order_number", "Unknown").lstrip("#")
         line_items = data.get("line_items", [])
@@ -480,12 +473,9 @@ def remove_fulfilled_sku(data):
     except Exception as e:
         logger.error(f"Error in remove_fulfilled_sku for order {order_number}: {str(e)}")
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
-    finally:
-        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def apply_formulas():
     """Apply formulas to Assign Type (G) and PIC (I) columns."""
-    lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
@@ -515,12 +505,9 @@ def apply_formulas():
     except Exception as e:
         logger.error(f"Error applying formulas: {str(e)}")
         raise
-    finally:
-        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def delete_rows():
     """Delete rows with specific SKUs."""
-    lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
@@ -575,12 +562,9 @@ def delete_rows():
     except Exception as e:
         logger.error(f"Error in delete_rows: {str(e)}")
         raise
-    finally:
-        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def delete_duplicate_rows():
     """Delete duplicate rows in the Sheet."""
-    lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
@@ -638,8 +622,6 @@ def delete_duplicate_rows():
     except Exception as e:
         logger.error(f"Error in delete_duplicate_rows: {str(e)}")
         raise
-    finally:
-        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 @app.route('/', methods=['GET'])
 def health_check():
