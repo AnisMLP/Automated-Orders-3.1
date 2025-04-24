@@ -1,4 +1,3 @@
-#TEST
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -40,8 +39,9 @@ except Exception as e:
     logger.error(f"Failed to initialize Google Sheets API: {str(e)}")
     service = None
 
-# File to store queued orders
+# File to store queued orders and failed orders
 QUEUE_FILE = '/tmp/order_queue.json' if IS_RENDER else 'order_queue.json'
+FAILED_ORDERS_FILE = '/tmp/failed_orders.json' if IS_RENDER else 'failed_orders.json'
 
 def load_queue():
     """Load the queue from file."""
@@ -76,6 +76,7 @@ def clean_json(raw_data):
         return raw_data
 
 def format_date(date_str):
+    """Format date string to YYYY-MM-DD."""
     try:
         date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         return f"{date.year}-{str(date.month).zfill(2)}-{str(date.day).zfill(2)}"
@@ -84,6 +85,7 @@ def format_date(date_str):
         return "Invalid Date"
 
 def group_skus_by_vendor(line_items):
+    """Group SKUs by vendor from line items."""
     sku_by_vendor = {}
     for item in line_items:
         sku, vendor = item.get('sku', 'Unknown SKU'), item.get('vendor', 'Unknown Vendor')
@@ -94,6 +96,7 @@ def group_skus_by_vendor(line_items):
     return sku_by_vendor
 
 def get_last_row():
+    """Get the last row in the Sheet."""
     if not service:
         logger.error("Google Sheets service not initialized")
         return 1
@@ -107,14 +110,29 @@ def get_last_row():
         logger.error(f"Error getting last row: {str(e)}")
         return 1
 
+def update_sheet_with_retry(range_to_write, body, max_attempts=3):
+    """Update Google Sheets with retry logic."""
+    for attempt in range(max_attempts):
+        try:
+            return service.spreadsheets().values().update(
+                spreadsheetId=SPREADSHEET_ID, range=range_to_write,
+                valueInputOption='RAW', body=body
+            ).execute()
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed for range {range_to_write}: {str(e)}")
+            if attempt < max_attempts - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+            else:
+                raise
+
 def process_order(data):
-    """Process a single order and write to Google Sheets with new column structure."""
+    """Process a single order and write to Google Sheets."""
     if not service:
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
     try:
         order_number = data.get("order_number", "Unknown")
-        logger.info(f"Processing order {order_number}")
+        logger.info(f"Processing order {order_number} with data: {json.dumps(data, indent=2)}")
         order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
         order_country = data.get("order_country", "Unknown")
         order_created = format_date(data.get("order_created", ""))
@@ -134,10 +152,7 @@ def process_order(data):
         range_to_write = f'{SHEET_NAME}!A{start_row}'
         body = {'values': rows_data}
         logger.info(f"Writing order {order_number} to Google Sheets at {range_to_write}")
-        result = service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID, range=range_to_write,
-            valueInputOption='RAW', body=body
-        ).execute()
+        update_sheet_with_retry(range_to_write, body)
 
         apply_formulas()
         delete_rows()
@@ -146,17 +161,18 @@ def process_order(data):
         logger.info(f"Successfully processed order {order_number} to Google Sheets")
         return True
     except Exception as e:
-        logger.error(f"Error processing order {data.get('order_number', 'Unknown')}: {str(e)}")
+        logger.error(f"Error processing order {order_number}: {str(e)}")
         return False
 
 def process_queue():
-    """Process all valid orders in the queue, skipping error entries."""
+    """Process all valid orders in the queue, moving failed orders to failed_orders.json."""
     queue = load_queue()
     if not queue:
         logger.info("Queue is empty, nothing to process")
         return
 
     updated_queue = []
+    max_retries = 3
     for order in queue:
         order_number = order.get("order_number", "Unknown")
         logger.info(f"Inspecting queued order {order_number}")
@@ -166,11 +182,23 @@ def process_queue():
             updated_queue.append(order)
             continue
 
-        logger.info(f"Attempting to process valid order {order_number}")
+        retries = order.get("retries", 0)
+        if retries >= max_retries:
+            logger.error(f"Order {order_number} exceeded {max_retries} retries, moving to failed orders")
+            try:
+                with open(FAILED_ORDERS_FILE, 'a') as f:
+                    json.dump(order, f)
+                    f.write('\n')
+            except Exception as e:
+                logger.error(f"Error saving to failed orders: {str(e)}")
+            continue
+
+        order["retries"] = retries + 1
+        logger.info(f"Attempting to process valid order {order_number}, retry {retries + 1}/{max_retries}")
         if process_order(order):
             logger.info(f"Order {order_number} processed successfully, removing from queue")
         else:
-            logger.warning(f"Order {order_number} failed processing, keeping in queue for inspection")
+            logger.warning(f"Order {order_number} failed processing, keeping in queue")
             updated_queue.append(order)
 
     save_queue(updated_queue)
@@ -179,6 +207,7 @@ def process_queue():
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
+    """Handle incoming webhook requests."""
     if not service:
         return jsonify({"error": "Google Sheets API not initialized"}), 500
 
@@ -186,7 +215,7 @@ def handle_webhook():
     if provided_key != SECRET_KEY:
         return jsonify({"error": "Access Denied"}), 403
 
-    logger.info(f"Raw request data: {request.data}")
+    logger.info(f"Raw request data: {request.data.decode('utf-8')}")
     logger.info(f"Request headers: {request.headers}")
 
     queue = load_queue()
@@ -232,6 +261,7 @@ def handle_webhook():
 
 @app.route('/queue', methods=['GET'])
 def view_queue():
+    """View the current queue."""
     provided_key = request.args.get('key')
     if provided_key != SECRET_KEY:
         return jsonify({"error": "Access Denied"}), 403
@@ -239,7 +269,27 @@ def view_queue():
     logger.info(f"Queue accessed. Size: {len(queue)}")
     return jsonify({"queue_size": len(queue), "orders": queue}), 200
 
+@app.route('/failed_orders', methods=['GET'])
+def view_failed_orders():
+    """View orders that failed processing after max retries."""
+    provided_key = request.args.get('key')
+    if provided_key != SECRET_KEY:
+        return jsonify({"error": "Access Denied"}), 403
+    try:
+        failed_orders = []
+        if os.path.exists(FAILED_ORDERS_FILE):
+            with open(FAILED_ORDERS_FILE, 'r') as f:
+                for line in f:
+                    if line.strip():
+                        failed_orders.append(json.loads(line))
+        logger.info(f"Failed orders accessed. Count: {len(failed_orders)}")
+        return jsonify({"failed_orders_count": len(failed_orders), "failed_orders": failed_orders}), 200
+    except Exception as e:
+        logger.error(f"Error reading failed orders: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 def add_backup_shipping_note(data):
+    """Add order with backup shipping note to Google Sheets."""
     order_number = data.get("order_number")
     order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
     order_country = data.get("order_country")
@@ -256,10 +306,7 @@ def add_backup_shipping_note(data):
     start_row = get_last_row()
     range_to_write = f'{SHEET_NAME}!A{start_row}:M{start_row + len(rows_data) - 1}'
     body = {'values': rows_data}
-    result = service.spreadsheets().values().update(
-        spreadsheetId=SPREADSHEET_ID, range=range_to_write,
-        valueInputOption='RAW', body=body
-    ).execute()
+    update_sheet_with_retry(range_to_write, body)
 
     apply_formulas()
     delete_rows()
@@ -268,6 +315,7 @@ def add_backup_shipping_note(data):
     return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
 
 def remove_fulfilled_sku(data):
+    """Remove fulfilled SKUs from the Sheet."""
     order_number = data.get("order_number")
     line_items = data.get("line_items", [])
 
@@ -288,15 +336,13 @@ def remove_fulfilled_sku(data):
                 ).execute()
             else:
                 values[i][3] = ', '.join(skus)
-                service.spreadsheets().values().update(
-                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}',
-                    valueInputOption='RAW', body={'values': [values[i]]}
-                ).execute()
+                update_sheet_with_retry(f'{SHEET_NAME}!A{i+1}:M{i+1}', {'values': [values[i]]})
             break
 
     return jsonify({"status": "success", "message": "Fulfilled SKUs removed"}), 200
 
 def apply_formulas():
+    """Apply formulas to Assign Type (G) and PIC (I) columns."""
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
     ).execute()
@@ -306,12 +352,10 @@ def apply_formulas():
     assign_type_formulas = []
     pic_formulas = []
     for row in range(2, last_row + 1):
-        # Assign Type (G)
         assign_type_formula = (
             f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
             f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
         )
-        # PIC (I)
         pic_formula = (
             f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
             f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
@@ -319,21 +363,14 @@ def apply_formulas():
         assign_type_formulas.append([assign_type_formula])
         pic_formulas.append([pic_formula])
 
-    # Assign Type formulas to column G
     if assign_type_formulas:
-        service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!G2:G{last_row}',
-            valueInputOption='USER_ENTERED', body={'values': assign_type_formulas}
-        ).execute()
+        update_sheet_with_retry(f'{SHEET_NAME}!G2:G{last_row}', {'values': assign_type_formulas}, valueInputOption='USER_ENTERED')
 
-    # PIC formulas to column I
     if pic_formulas:
-        service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!I2:I{last_row}',
-            valueInputOption='USER_ENTERED', body={'values': pic_formulas}
-        ).execute()
+        update_sheet_with_retry(f'{SHEET_NAME}!I2:I{last_row}', {'values': pic_formulas}, valueInputOption='USER_ENTERED')
 
 def delete_rows():
+    """Delete rows with specific SKUs."""
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
     ).execute()
@@ -351,6 +388,7 @@ def delete_rows():
         ).execute()
 
 def delete_duplicate_rows():
+    """Delete duplicate rows in the Sheet."""
     result = service.spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
     ).execute()
@@ -372,6 +410,7 @@ def delete_duplicate_rows():
 
 @app.route('/', methods=['GET'])
 def health_check():
+    """Health check endpoint."""
     return jsonify({"status": "healthy"}), 200
 
 if __name__ == '__main__':
