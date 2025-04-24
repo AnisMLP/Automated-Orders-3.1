@@ -8,6 +8,7 @@ import json
 from dotenv import load_dotenv
 import time
 import re
+from googleapiclient.errors import HttpError
 
 load_dotenv()
 app = Flask(__name__)
@@ -95,6 +96,22 @@ def group_skus_by_vendor(line_items):
             sku_by_vendor[vendor].append(sku)
     return sku_by_vendor
 
+def get_sheet_id():
+    """Get the sheetId for the specified SHEET_NAME."""
+    if not service:
+        logger.error("Google Sheets service not initialized")
+        return None
+    try:
+        spreadsheet = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        for sheet in spreadsheet.get('sheets', []):
+            if sheet.get('properties', {}).get('title') == SHEET_NAME:
+                return sheet.get('properties', {}).get('sheetId')
+        logger.error(f"Sheet {SHEET_NAME} not found in spreadsheet")
+        return None
+    except Exception as e:
+        logger.error(f"Error getting sheet ID: {str(e)}")
+        return None
+
 def get_last_row():
     """Get the last row in the Sheet."""
     if not service:
@@ -102,7 +119,7 @@ def get_last_row():
         return 1
     try:
         result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
         values = result.get('values', [])
         return len(values) + 1 if values else 1
@@ -118,18 +135,22 @@ def update_sheet_with_retry(range_to_write, body, max_attempts=3, valueInputOpti
                 spreadsheetId=SPREADSHEET_ID, range=range_to_write,
                 valueInputOption=valueInputOption, body=body
             ).execute()
-        except Exception as e:
+        except HttpError as e:
             logger.error(f"Attempt {attempt + 1} failed for range {range_to_write}: {str(e)}")
             if attempt < max_attempts - 1:
                 time.sleep(2 ** attempt)  # Exponential backoff
             else:
                 raise
+        except Exception as e:
+            logger.error(f"Unexpected error updating sheet for range {range_to_write}: {str(e)}")
+            raise
 
 def process_order(data):
     """Process a single order and write to Google Sheets."""
     if not service:
         logger.error("Cannot process order: Google Sheets service not initialized")
         return False
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
     try:
         order_number = data.get("order_number", "Unknown")
         logger.info(f"Processing order {order_number} with data: {json.dumps(data, indent=2)}")
@@ -157,7 +178,7 @@ def process_order(data):
 
         sku_by_vendor = group_skus_by_vendor(line_items)
         rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", ""]
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "", ""]
             for vendor, skus in sku_by_vendor.items()
         ]
 
@@ -176,6 +197,8 @@ def process_order(data):
     except Exception as e:
         logger.error(f"Error processing order {order_number}: {str(e)}")
         return False
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def process_queue():
     """Process all valid orders in the queue, moving failed orders to failed_orders.json."""
@@ -303,135 +326,320 @@ def view_failed_orders():
 
 def add_backup_shipping_note(data):
     """Add order with backup shipping note to Google Sheets."""
-    order_number = data.get("order_number")
-    
-    # Check for duplicate order number in column B
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!B:B'
-    ).execute()
-    order_numbers = result.get('values', [])
-    order_numbers = [row[0] for row in order_numbers if row and row[0]]
-    
-    if str(order_number) in order_numbers:
-        logger.warning(f"Duplicate order number {order_number} found in column B, skipping processing")
-        return jsonify({"status": "skipped", "message": f"Order {order_number} is a duplicate"}), 200
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
+    try:
+        order_number = data.get("order_number")
+        
+        # Check for duplicate order number in column B
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!B:B'
+        ).execute()
+        order_numbers = result.get('values', [])
+        order_numbers = [row[0] for row in order_numbers if row and row[0]]
+        
+        if str(order_number) in order_numbers:
+            logger.warning(f"Duplicate order number {order_number} found in column B, skipping processing")
+            return jsonify({"status": "skipped", "message": f"Order {order_number} is a duplicate"}), 200
 
-    order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
-    order_country = data.get("order_country")
-    backup_note = data.get("backup_shipping_note")
-    order_created = format_date(data.get("order_created"))
-    line_items = data.get("line_items", [])
+        order_id = data.get("order_id").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
+        order_country = data.get("order_country")
+        backup_note = data.get("backup_shipping_note")
+        order_created = format_date(data.get("order_created"))
+        line_items = data.get("line_items", [])
 
-    sku_by_vendor = group_skus_by_vendor(line_items)
-    rows_data = [
-        [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", backup_note]
-        for vendor, skus in sku_by_vendor.items()
-    ]
+        sku_by_vendor = group_skus_by_vendor(line_items)
+        rows_data = [
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", backup_note, ""]
+            for vendor, skus in sku_by_vendor.items()
+        ]
 
-    start_row = get_last_row()
-    range_to_write = f'{SHEET_NAME}!A{start_row}:M{start_row + len(rows_data) - 1}'
-    body = {'values': rows_data}
-    update_sheet_with_retry(range_to_write, body)
+        start_row = get_last_row()
+        range_to_write = f'{SHEET_NAME}!A{start_row}:N{start_row + len(rows_data) - 1}'
+        body = {'values': rows_data}
+        update_sheet_with_retry(range_to_write, body)
 
-    apply_formulas()
-    delete_rows()
-    delete_duplicate_rows()
+        apply_formulas()
+        delete_rows()
+        delete_duplicate_rows()
 
-    return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
+        return jsonify({"status": "success", "message": "Data with backup shipping note added successfully"}), 200
+    except Exception as e:
+        logger.error(f"Error in add_backup_shipping_note for order {order_number}: {str(e)}")
+        return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def remove_fulfilled_sku(data):
     """Remove fulfilled SKUs from the Sheet."""
-    order_number = data.get("order_number")
-    line_items = data.get("line_items", [])
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
+    try:
+        order_number = data.get("order_number", "Unknown").lstrip("#")
+        line_items = data.get("line_items", [])
+        logger.info(f"Processing remove_fulfilled_sku for order {order_number}, line_items: {line_items}")
 
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
-    ).execute()
-    values = result.get('values', [])
+        if not service:
+            logger.error("Google Sheets service not initialized")
+            return jsonify({"status": "error", "message": "Google Sheets API not initialized"}), 500
 
-    for i, row in enumerate(values):
-        if len(row) > 1 and row[1] == order_number:
-            skus = row[3].split(', ') if len(row) > 3 else []
-            for item in line_items:
-                if item['sku'] in skus:
-                    skus.remove(item['sku'])
-            if not skus:
-                service.spreadsheets().values().clear(
-                    spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:M{i+1}'
-                ).execute()
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
+        ).execute()
+        values = result.get('values', [])
+        logger.info(f"Retrieved {len(values)} rows from sheet")
+
+        rows_to_delete = []
+        rows_to_update = []
+        for i, row in enumerate(values):
+            if len(row) > 1 and row[1].lstrip("#") == order_number:
+                logger.info(f"Found matching row {i+1} for order {order_number}")
+                skus = row[3].split(', ') if len(row) > 3 and row[3] else []
+                if not line_items:
+                    logger.info(f"No line items provided, marking row {i+1} for deletion")
+                    rows_to_delete.append(i)
+                    continue
+                for item in line_items:
+                    sku = item.get('sku')
+                    if sku and sku in skus:
+                        skus.remove(sku)
+                        logger.info(f"Removed SKU {sku} from row {i+1}")
+                if not skus:
+                    logger.info(f"No SKUs remain in row {i+1}, marking for deletion")
+                    rows_to_delete.append(i)
+                else:
+                    row[3] = ', '.join(skus)
+                    rows_to_update.append((i, row))
+                    logger.info(f"Updated row {i+1} with SKUs: {row[3]}")
+
+        if rows_to_delete:
+            rows_to_delete.sort(reverse=True)
+            request_body = {
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": get_sheet_id(),
+                                "dimension": "ROWS",
+                                "startIndex": i,
+                                "endIndex": i + 1
+                            }
+                        }
+                    }
+                    for i in rows_to_delete
+                ]
+            }
+            for attempt in range(3):
+                try:
+                    service.spreadsheets().batchUpdate(
+                        spreadsheetId=SPREADSHEET_ID,
+                        body=request_body
+                    ).execute()
+                    logger.info(f"Deleted rows: {rows_to_delete}")
+                    break
+                except HttpError as e:
+                    if e.resp.status in [429, 503]:
+                        logger.warning(f"Rate limit or service error deleting rows, attempt {attempt+1}: {str(e)}")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Error deleting rows for order {order_number}: {str(e)}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Unexpected error deleting rows for order {order_number}: {str(e)}")
+                    raise
             else:
-                values[i][3] = ', '.join(skus)
-                update_sheet_with_retry(f'{SHEET_NAME}!A{i+1}:M{i+1}', {'values': [values[i]]})
-            break
+                logger.error(f"Failed to delete rows for order {order_number} after 3 attempts")
+                return jsonify({"status": "error", "message": "Failed to delete rows"}), 500
 
-    return jsonify({"status": "success", "message": "Fulfilled SKUs removed"}), 200
+        for i, row in rows_to_update:
+            for attempt in range(3):
+                try:
+                    service.spreadsheets().values().update(
+                        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A{i+1}:N{i+1}',
+                        valueInputOption='RAW', body={'values': [row]}
+                    ).execute()
+                    logger.info(f"Updated row {i+1}")
+                    break
+                except HttpError as e:
+                    if e.resp.status in [429, 503]:
+                        logger.warning(f"Rate limit or service error updating row, attempt {attempt+1}: {str(e)}")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Error updating row {i+1}: {str(e)}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Unexpected error updating row {i+1}: {str(e)}")
+                    raise
+            else:
+                logger.error(f"Failed to update row {i+1} after 3 attempts")
+                return jsonify({"status": "error", "message": "Failed to update row"}), 500
+
+        if not rows_to_delete and not rows_to_update:
+            logger.warning(f"No rows found for order {order_number}")
+            return jsonify({"status": "success", "message": "No matching rows found"}), 200
+
+        return jsonify({"status": "success", "message": "Fulfilled SKUs removed or rows deleted"}), 200
+    except Exception as e:
+        logger.error(f"Error in remove_fulfilled_sku for order {order_number}: {str(e)}")
+        return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def apply_formulas():
     """Apply formulas to Assign Type (G) and PIC (I) columns."""
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
-    ).execute()
-    values = result.get('values', [])
-    last_row = len(values) + 1 if values else 2
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
+        ).execute()
+        values = result.get('values', [])
+        last_row = len(values) + 1 if values else 2
 
-    assign_type_formulas = []
-    pic_formulas = []
-    for row in range(2, last_row + 1):
-        assign_type_formula = (
-            f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
-            f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
-        )
-        pic_formula = (
-            f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
-            f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
-        )
-        assign_type_formulas.append([assign_type_formula])
-        pic_formulas.append([pic_formula])
+        assign_type_formulas = []
+        pic_formulas = []
+        for row in range(2, last_row + 1):
+            assign_type_formula = (
+                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
+                f'XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),XLOOKUP(E{row},assign_types!A:A,assign_types!B:B)),"")'
+            )
+            pic_formula = (
+                f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
+                f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
+            )
+            assign_type_formulas.append([assign_type_formula])
+            pic_formulas.append([pic_formula])
 
-    if assign_type_formulas:
-        update_sheet_with_retry(f'{SHEET_NAME}!G2:G{last_row}', {'values': assign_type_formulas}, valueInputOption='USER_ENTERED')
+        if assign_type_formulas:
+            update_sheet_with_retry(f'{SHEET_NAME}!G2:G{last_row}', {'values': assign_type_formulas}, valueInputOption='USER_ENTERED')
 
-    if pic_formulas:
-        update_sheet_with_retry(f'{SHEET_NAME}!I2:I{last_row}', {'values': pic_formulas}, valueInputOption='USER_ENTERED')
+        if pic_formulas:
+            update_sheet_with_retry(f'{SHEET_NAME}!I2:I{last_row}', {'values': pic_formulas}, valueInputOption='USER_ENTERED')
+    except Exception as e:
+        logger.error(f"Error applying formulas: {str(e)}")
+        raise
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def delete_rows():
     """Delete rows with specific SKUs."""
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
-    ).execute()
-    values = result.get('values', [])
-    rows_to_clear = []
-
-    for i, row in enumerate(values):
-        sku_cell = row[3] if len(row) > 3 else ''
-        if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')
-
-    for row_range in rows_to_clear:
-        service.spreadsheets().values().clear(
-            spreadsheetId=SPREADSHEET_ID, range=row_range
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
+        values = result.get('values', [])
+        rows_to_delete = []
+
+        for i, row in enumerate(values):
+            sku_cell = row[3] if len(row) > 3 else ''
+            if sku_cell in ['Tip', 'MLP-AIR-FRESHENER', '']:
+                rows_to_delete.append(i)
+
+        if rows_to_delete:
+            rows_to_delete.sort(reverse=True)
+            sheet_id = get_sheet_id()
+            if sheet_id is None:
+                logger.error("Cannot delete rows: Sheet ID not found")
+                raise Exception("Cannot delete rows: Sheet ID not found")
+            requests = [
+                {
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": i,
+                            "endIndex": i + 1
+                        }
+                    }
+                }
+                for i in rows_to_delete
+            ]
+            for attempt in range(3):
+                try:
+                    service.spreadsheets().batchUpdate(
+                        spreadsheetId=SPREADSHEET_ID, body={"requests": requests}
+                    ).execute()
+                    logger.info(f"Deleted rows: {rows_to_delete}")
+                    break
+                except HttpError as e:
+                    if e.resp.status in [429, 503]:
+                        logger.warning(f"Rate limit or service error deleting rows, attempt {attempt+1}: {str(e)}")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Error deleting rows: {str(e)}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Unexpected error deleting rows: {str(e)}")
+                    raise
+            else:
+                logger.error("Failed to delete rows after 3 attempts")
+                raise Exception("Failed to delete rows")
+    except Exception as e:
+        logger.error(f"Error in delete_rows: {str(e)}")
+        raise
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 def delete_duplicate_rows():
     """Delete duplicate rows in the Sheet."""
-    result = service.spreadsheets().values().get(
-        spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:M'
-    ).execute()
-    values = result.get('values', [])
-    unique_rows = {}
-    rows_to_clear = []
-
-    for i, row in enumerate(values):
-        row_str = ','.join(map(str, row))
-        if row_str in unique_rows:
-            rows_to_clear.append(f'{SHEET_NAME}!A{i+1}:M{i+1}')
-        else:
-            unique_rows[row_str] = True
-
-    for row_range in rows_to_clear:
-        service.spreadsheets().values().clear(
-            spreadsheetId=SPREADSHEET_ID, range=row_range
+    lock_fd = acquire_lock(SHEET_LOCK_FILE)
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
+        values = result.get('values', [])
+        unique_rows = {}
+        rows_to_delete = []
+
+        for i, row in enumerate(values):
+            row_str = ','.join(map(str, row))
+            if row_str in unique_rows:
+                rows_to_delete.append(i)
+            else:
+                unique_rows[row_str] = True
+
+        if rows_to_delete:
+            rows_to_delete.sort(reverse=True)
+            sheet_id = get_sheet_id()
+            if sheet_id is None:
+                logger.error("Cannot delete rows: Sheet ID not found")
+                raise Exception("Cannot delete rows: Sheet ID not found")
+            requests = [
+                {
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "ROWS",
+                            "startIndex": i,
+                            "endIndex": i + 1
+                        }
+                    }
+                }
+                for i in rows_to_delete
+            ]
+            for attempt in range(3):
+                try:
+                    service.spreadsheets().batchUpdate(
+                        spreadsheetId=SPREADSHEET_ID, body={"requests": requests}
+                    ).execute()
+                    logger.info(f"Deleted duplicate rows: {rows_to_delete}")
+                    break
+                except HttpError as e:
+                    if e.resp.status in [429, 503]:
+                        logger.warning(f"Rate limit or service error deleting rows, attempt {attempt+1}: {str(e)}")
+                        time.sleep(2 ** attempt)
+                    else:
+                        logger.error(f"Error deleting duplicate rows: {str(e)}")
+                        raise
+                except Exception as e:
+                    logger.error(f"Unexpected error deleting duplicate rows: {str(e)}")
+                    raise
+            else:
+                logger.error("Failed to delete duplicate rows after 3 attempts")
+                raise Exception("Failed to delete duplicate rows")
+    except Exception as e:
+        logger.error(f"Error in delete_duplicate_rows: {str(e)}")
+        raise
+    finally:
+        release_lock(lock_fd, SHEET_LOCK_FILE)
 
 @app.route('/', methods=['GET'])
 def health_check():
