@@ -1,3 +1,5 @@
+# New code that includes VIN number, Filters out order price if more than 500 = "TBC no"
+
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -17,9 +19,9 @@ logger = logging.getLogger(__name__)
 
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1maWDz6_g-9qOgTPwFvZsAmUPlO-d3lP4J6U4JFUgkRE'
+SPREADSHEET_ID = '1wVlSsqccU15fxKeH4tGvOrKCGpc9UTO3lbt-uL8VCGo'
 SHEET_NAME = 'Orders 3.2'
-SECRET_KEY = os.getenv('SECRET_KEY', 'your_default_secret_key')
+SECRET_KEY = os.getenv('SECRET_KEY', 'abc123')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
 IS_RENDER = os.getenv('RENDER') == 'true'
 
@@ -85,16 +87,17 @@ def format_date(date_str):
         logger.error(f"Error formatting date {date_str}: {str(e)}")
         return "Invalid Date"
 
-def group_skus_by_vendor(line_items):
-    """Group SKUs by vendor from line items."""
-    sku_by_vendor = {}
+def group_skus_by_vendor_and_vin(line_items):
+    """Group SKUs by vendor and VIN from line items."""
+    sku_by_vendor_vin = {}
     for item in line_items:
-        sku, vendor = item.get('sku', 'Unknown SKU'), item.get('vendor', 'Unknown Vendor')
-        if vendor not in sku_by_vendor:
-            sku_by_vendor[vendor] = [sku]
+        sku, vendor, vin = item.get('sku', 'Unknown SKU'), item.get('vendor', 'Unknown Vendor'), item.get('vin', '')
+        key = (vendor, vin)  # Group by vendor and VIN
+        if key not in sku_by_vendor_vin:
+            sku_by_vendor_vin[key] = [sku]
         else:
-            sku_by_vendor[vendor].append(sku)
-    return sku_by_vendor
+            sku_by_vendor_vin[key].append(sku)
+    return sku_by_vendor_vin
 
 def get_sheet_id():
     """Get the sheetId for the specified SHEET_NAME."""
@@ -159,26 +162,27 @@ def process_order(data):
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!B:B'
         ).execute()
         order_numbers = result.get('values', [])
-        # Flatten the list and remove empty values
         order_numbers = [row[0] for row in order_numbers if row and row[0]]
         
         if str(order_number) in order_numbers:
             logger.warning(f"Duplicate order number {order_number} found in column B, skipping processing")
-            return True  # Return True to indicate the order was handled (skipped)
+            return True
 
         order_id = data.get("order_id", "").replace("gid://shopify/Order/", "https://admin.shopify.com/store/mlperformance/orders/")
         order_country = data.get("order_country", "Unknown")
         order_created = format_date(data.get("order_created", ""))
         line_items = data.get("line_items", [])
+        order_total = float(data.get("order_total", "0")) if data.get("order_total") else 0.0
+        status = "TBC (No)" if order_total > 500 else ""
 
         if not line_items:
             logger.warning(f"Order {order_number} has no line items, skipping Google Sheets write")
             return True
 
-        sku_by_vendor = group_skus_by_vendor(line_items)
+        sku_by_vendor_vin = group_skus_by_vendor_and_vin(line_items)
         rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", "", ""]
-            for vendor, skus in sku_by_vendor.items()
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if vin else "", "", ""]
+            for (vendor, vin), skus in sku_by_vendor_vin.items()
         ]
 
         start_row = get_last_row()
@@ -233,6 +237,7 @@ def process_queue():
         else:
             logger.warning(f"Order {order_number} failed processing, keeping in queue")
             updated_queue.append(order)
+        time.sleep(1)  # Add delay to avoid Google API quota limits
 
     save_queue(updated_queue)
     logger.info(f"Queue processing complete. New queue size: {len(updated_queue)}")
@@ -342,11 +347,13 @@ def add_backup_shipping_note(data):
         backup_note = data.get("backup_shipping_note")
         order_created = format_date(data.get("order_created"))
         line_items = data.get("line_items", [])
+        order_total = float(data.get("order_total", "0")) if data.get("order_total") else 0.0
+        status = "TBC (No)" if order_total > 500 else ""
 
-        sku_by_vendor = group_skus_by_vendor(line_items)
+        sku_by_vendor_vin = group_skus_by_vendor_and_vin(line_items)
         rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", "", "", "", backup_note, ""]
-            for vendor, skus in sku_by_vendor.items()
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if vin else "", backup_note, ""]
+            for (vendor, vin), skus in sku_by_vendor_vin.items()
         ]
 
         start_row = get_last_row()
