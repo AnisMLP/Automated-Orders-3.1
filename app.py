@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Google Sheets setup
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = '1wVlSsqccU15fxKeH4tGvOrKCGpc9UTO3lbt-uL8VCGo'
+SPREADSHEET_ID = '1maWDz6_g-9qOgTPwFvZsAmUPlO-d3lP4J6U4JFUgkRE'
 SHEET_NAME = 'Orders 3.2'
 SECRET_KEY = os.getenv('SECRET_KEY', 'abc123')
 GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS')
