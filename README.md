@@ -1,8 +1,9 @@
 This is for Orders 3.2 Ordering Necessiies.
 
 Latest Updates:
-5/5/2025: - Added "Please Check VIN" in Column L
-          - Column J Status set to "TBC (No)" for orders above $500
+5/5/2025:
+- Added "Please Check VIN" in Column L
+- Column J Status set to "TBC (No)" for orders above $500
 
 Quick note about the 'Status' column (Column J) in Orders 3.2:
 - You might notice the dropdown arrow is missing, unlike in Orders 3.1. This is because we used Google Apps Script before, but now we're using code connected to Render.
