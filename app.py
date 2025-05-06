@@ -1,4 +1,4 @@
-# New code that includes VIN number, Filters out order price if more than 500 = "TBC no"
+# New code added Suplier for column 'H'
 
 from flask import Flask, request, jsonify
 import logging
@@ -482,7 +482,7 @@ def remove_fulfilled_sku(data):
         return jsonify({"status": "error", "message": f"Processing failed: {str(e)}"}), 500
 
 def apply_formulas():
-    """Apply formulas to Assign Type (G) and PIC (I) columns."""
+    """Apply formulas to Assign Type (G), PIC (I), and Supplier (H) columns."""
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
@@ -492,6 +492,7 @@ def apply_formulas():
 
         assign_type_formulas = []
         pic_formulas = []
+        supplier_formulas = []
         for row in range(2, last_row + 1):
             assign_type_formula = (
                 f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!D:D,assign_types!E:E),'
@@ -501,14 +502,22 @@ def apply_formulas():
                 f'=IFNA(IF(F{row}="US",IFNA(XLOOKUP(E{row},assign_types!E:E,assign_types!F:F),'
                 f'XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),XLOOKUP(E{row},assign_types!A:A,assign_types!C:C)),"")'
             )
+            supplier_formula = (
+                f'=IFNA(XLOOKUP(E{row},\'[Auto] Supplier\'!A:A,\'[Auto] Supplier\'!B:B),"")'
+            )
             assign_type_formulas.append([assign_type_formula])
             pic_formulas.append([pic_formula])
+            supplier_formulas.append([supplier_formula])
 
         if assign_type_formulas:
             update_sheet_with_retry(f'{SHEET_NAME}!G2:G{last_row}', {'values': assign_type_formulas}, valueInputOption='USER_ENTERED')
 
         if pic_formulas:
             update_sheet_with_retry(f'{SHEET_NAME}!I2:I{last_row}', {'values': pic_formulas}, valueInputOption='USER_ENTERED')
+
+        if supplier_formulas:
+            update_sheet_with_retry(f'{SHEET_NAME}!H2:H{last_row}', {'values': supplier_formulas}, valueInputOption='USER_ENTERED')
+
     except Exception as e:
         logger.error(f"Error applying formulas: {str(e)}")
         raise
