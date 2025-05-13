@@ -1,4 +1,4 @@
-# New code added Suplier for column 'H'
+# 10 May 2025: code added seperate by vendors. TB NO for oders with tag an above 500
 
 from flask import Flask, request, jsonify
 import logging
@@ -87,17 +87,20 @@ def format_date(date_str):
         logger.error(f"Error formatting date {date_str}: {str(e)}")
         return "Invalid Date"
 
-def group_skus_by_vendor_and_vin(line_items):
-    """Group SKUs by vendor and VIN from line items."""
-    sku_by_vendor_vin = {}
+def group_skus_by_vendor(line_items):
+    """Group SKUs by vendor from line items."""
+    sku_by_vendor = {}
+    has_vin_by_vendor = {}  # Track if any item for the vendor has a VIN
     for item in line_items:
         sku, vendor, vin = item.get('sku', 'Unknown SKU'), item.get('vendor', 'Unknown Vendor'), item.get('vin', '')
-        key = (vendor, vin)  # Group by vendor and VIN
-        if key not in sku_by_vendor_vin:
-            sku_by_vendor_vin[key] = [sku]
+        if vendor not in sku_by_vendor:
+            sku_by_vendor[vendor] = [sku]
+            has_vin_by_vendor[vendor] = bool(vin)
         else:
-            sku_by_vendor_vin[key].append(sku)
-    return sku_by_vendor_vin
+            sku_by_vendor[vendor].append(sku)
+            if vin:
+                has_vin_by_vendor[vendor] = True
+    return sku_by_vendor, has_vin_by_vendor
 
 def get_sheet_id():
     """Get the sheetId for the specified SHEET_NAME."""
@@ -116,19 +119,26 @@ def get_sheet_id():
         return None
 
 def get_last_row():
-    """Get the last row in the Sheet."""
+    """Get the last row in the Sheet, ensuring new rows are appended."""
     if not service:
         logger.error("Google Sheets service not initialized")
-        return 1
+        return 2  # Append at row 2 to preserve header
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SPREADSHEET_ID, range=f'{SHEET_NAME}!A:N'
         ).execute()
         values = result.get('values', [])
-        return len(values) + 1 if values else 1
+        logger.info(f"get_last_row: Retrieved {len(values)} rows from {SHEET_NAME}!A:N")
+        if not values:
+            logger.info("Sheet is empty, appending at row 2 to preserve header")
+            return 2  # Append at row 2
+        return len(values) + 1  # Append after last row
+    except HttpError as e:
+        logger.error(f"HttpError getting last row: {str(e)}")
+        return 2  # Append at row 2 on error
     except Exception as e:
-        logger.error(f"Error getting last row: {str(e)}")
-        return 1
+        logger.error(f"Unexpected error getting last row: {str(e)}")
+        return 2  # Append at row 2 on error
 
 def update_sheet_with_retry(range_to_write, body, max_attempts=3, valueInputOption='RAW'):
     """Update Google Sheets with retry logic."""
@@ -173,19 +183,30 @@ def process_order(data):
         order_created = format_date(data.get("order_created", ""))
         line_items = data.get("line_items", [])
         order_total = float(data.get("order_total", "0")) if data.get("order_total") else 0.0
-        status = "TBC (No)" if order_total > 500 else ""
+        
+        # Handle tags as string or list
+        tags = data.get("tags", "")
+        if isinstance(tags, str):
+            tags_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        elif isinstance(tags, list):
+            tags_list = [tag.strip() for tag in tags if isinstance(tag, str) and tag.strip()]
+        else:
+            tags_list = []
+        logger.info(f"Parsed tags for order {order_number}: {tags_list}")
+        has_vin_tag = any(tag == "Call for VIN Alert Sent" or tag == "VIN Request Email Sent" for tag in tags_list)
+        status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
 
         if not line_items:
             logger.warning(f"Order {order_number} has no line items, skipping Google Sheets write")
             return True
 
-        sku_by_vendor_vin = group_skus_by_vendor_and_vin(line_items)
+        sku_by_vendor, has_vin_by_vendor = group_skus_by_vendor(line_items)
         rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if vin else "", "", ""]
-            for (vendor, vin), skus in sku_by_vendor_vin.items()
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if has_vin_by_vendor[vendor] else "", "", ""]
+            for vendor, skus in sku_by_vendor.items()
         ]
 
-        start_row = get_last_row()
+        start_row = max(2, get_last_row())  # Ensure we append and don't overwrite header
         range_to_write = f'{SHEET_NAME}!A{start_row}'
         body = {'values': rows_data}
         logger.info(f"Writing order {order_number} to Google Sheets at {range_to_write}")
@@ -348,17 +369,29 @@ def add_backup_shipping_note(data):
         order_created = format_date(data.get("order_created"))
         line_items = data.get("line_items", [])
         order_total = float(data.get("order_total", "0")) if data.get("order_total") else 0.0
-        status = "TBC (No)" if order_total > 500 else ""
+        
+        # Handle tags as string or list
+        tags = data.get("tags", "")
+        if isinstance(tags, str):
+            tags_list = [tag.strip() for tag in tags.split(",") if tag.strip()]
+        elif isinstance(tags, list):
+            tags_list = [tag.strip() for tag in tags if isinstance(tag, str) and tag.strip()]
+        else:
+            tags_list = []
+        logger.info(f"Parsed tags for order {order_number}: {tags_list}")
+        has_vin_tag = any(tag == "Call for VIN Alert Sent" or tag == "VIN Request Email Sent" for tag in tags_list)
+        status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
 
-        sku_by_vendor_vin = group_skus_by_vendor_and_vin(line_items)
+        sku_by_vendor, has_vin_by_vendor = group_skus_by_vendor(line_items)
         rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if vin else "", backup_note, ""]
-            for (vendor, vin), skus in sku_by_vendor_vin.items()
+            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if has_vin_by_vendor[vendor] else "", backup_note, ""]
+            for vendor, skus in sku_by_vendor.items()
         ]
 
-        start_row = get_last_row()
+        start_row = max(2, get_last_row())  # Ensure we append and don't overwrite header
         range_to_write = f'{SHEET_NAME}!A{start_row}:N{start_row + len(rows_data) - 1}'
         body = {'values': rows_data}
+        logger.info(f"Writing order {order_number} to Google Sheets at {range_to_write}")
         update_sheet_with_retry(range_to_write, body)
 
         apply_formulas()
