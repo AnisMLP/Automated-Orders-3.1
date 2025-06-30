@@ -1,5 +1,4 @@
-# 10 May 2025: code added seperate by vendors. TB NO for oders with tag an above 500
-
+# 26 June: Add instock and In-coming
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -196,15 +195,40 @@ def process_order(data):
         has_vin_tag = any(tag == "Call for VIN Alert Sent" or tag == "VIN Request Email Sent" for tag in tags_list)
         status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
 
+        sku_by_vendor, has_vin_by_vendor = group_skus_by_vendor(line_items)
+
         if not line_items:
             logger.warning(f"Order {order_number} has no line items, skipping Google Sheets write")
             return True
 
         sku_by_vendor, has_vin_by_vendor = group_skus_by_vendor(line_items)
-        rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if has_vin_by_vendor[vendor] else "", "", ""]
-            for vendor, skus in sku_by_vendor.items()
-        ]
+        rows_data = []
+        for vendor, skus in sku_by_vendor.items():
+            vendor_items = [item for item in line_items if item.get('vendor') == vendor]
+
+            # Column J logic: Keep TBC (No) if applicable
+            this_status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
+
+            # Column M logic: Detailed per-SKU messages
+            sku_messages = []
+            for item in vendor_items:
+                sku = item.get('sku')
+                if int(item.get('incoming', 0)) > 0:
+                    sku_messages.append(f"Notice: 📦 Incoming stock on the way for {sku}")
+                elif int(item.get('available', 0)) > 0:
+                    sku_messages.append(f"Notice: 📦 In stock for {sku}")
+
+            rows_data.append([
+                order_created,
+                order_number,
+                order_id,
+                ', '.join(skus),
+                vendor,
+                order_country,
+                "", "", "", this_status,  # Column J still gets TBC (No)
+                "", "Please Check VIN" if has_vin_by_vendor[vendor] else "",
+                "", "\n".join(sku_messages)  # Column M now gets incoming/instock text
+            ])
 
         start_row = max(2, get_last_row())  # Ensure we append and don't overwrite header
         range_to_write = f'{SHEET_NAME}!A{start_row}'
@@ -383,10 +407,33 @@ def add_backup_shipping_note(data):
         status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
 
         sku_by_vendor, has_vin_by_vendor = group_skus_by_vendor(line_items)
-        rows_data = [
-            [order_created, order_number, order_id, ', '.join(skus), vendor, order_country, "", "", "", status, "", "Please Check VIN" if has_vin_by_vendor[vendor] else "", backup_note, ""]
-            for vendor, skus in sku_by_vendor.items()
-        ]
+        rows_data = []
+        for vendor, skus in sku_by_vendor.items():
+            vendor_items = [item for item in line_items if item.get('vendor') == vendor]
+
+            # Column J logic: Keep TBC (No) if applicable
+            this_status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
+
+            # Column M logic: Detailed per-SKU messages
+            sku_messages = []
+            for item in vendor_items:
+                sku = item.get('sku')
+                if int(item.get('incoming', 0)) > 0:
+                    sku_messages.append(f"Notice: 📦 Incoming stock on the way for {sku}")
+                elif int(item.get('available', 0)) > 0:
+                    sku_messages.append(f"Notice: 📦 In stock for {sku}")
+
+            rows_data.append([
+                order_created,
+                order_number,
+                order_id,
+                ', '.join(skus),
+                vendor,
+                order_country,
+                "", "", "", this_status,  # Column J still gets TBC (No)
+                "", "Please Check VIN" if has_vin_by_vendor[vendor] else "",
+                "", "\n".join(sku_messages)  # Column M now gets incoming/instock text
+            ])
 
         start_row = max(2, get_last_row())  # Ensure we append and don't overwrite header
         range_to_write = f'{SHEET_NAME}!A{start_row}:N{start_row + len(rows_data) - 1}'
