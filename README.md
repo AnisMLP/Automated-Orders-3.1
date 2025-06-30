@@ -29,7 +29,7 @@ Date | Order Number | URL | SKU | Brand | Country | Assign Type | Date Due | PIC
 
 **5/5/2025**
 - Added "Please Check VIN" in Column L for orders that contain a VIN number.
-- Column J (`Status`) is automatically set to **"TBC (No)"** for orders over **$500**.
+- Column J (`Status`) is automatically set to **"TBC (No)"** for orders over **$500** with specific tags.
 
 ---
 
