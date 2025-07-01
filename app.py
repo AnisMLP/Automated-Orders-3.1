@@ -201,7 +201,6 @@ def process_order(data):
             logger.warning(f"Order {order_number} has no line items, skipping Google Sheets write")
             return True
 
-        sku_by_vendor, has_vin_by_vendor = group_skus_by_vendor(line_items)
         rows_data = []
         for vendor, skus in sku_by_vendor.items():
             vendor_items = [item for item in line_items if item.get('vendor') == vendor]
@@ -209,14 +208,14 @@ def process_order(data):
             # Column J logic: Keep TBC (No) if applicable
             this_status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
 
-            # Column M logic: Detailed per-SKU messages
+            # Column M logic: Combine SKUs by stock status
+            incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
+            instock_skus = [item.get('sku') for item in vendor_items if int(item.get('available', 0)) > 0]
             sku_messages = []
-            for item in vendor_items:
-                sku = item.get('sku')
-                if int(item.get('incoming', 0)) > 0:
-                    sku_messages.append(f"Notice: 📦 Incoming stock on the way for {sku}")
-                elif int(item.get('available', 0)) > 0:
-                    sku_messages.append(f"Notice: 📦 In stock for {sku}")
+            if incoming_skus:
+                sku_messages.append(f"Notice: 📦 Incoming stock on the way for SKUs: {', '.join(incoming_skus)}")
+            if instock_skus:
+                sku_messages.append(f"In stock for {', '.join(instock_skus)}")
 
             rows_data.append([
                 order_created,
@@ -225,9 +224,9 @@ def process_order(data):
                 ', '.join(skus),
                 vendor,
                 order_country,
-                "", "", "", this_status,  # Column J still gets TBC (No)
+                "", "", "", this_status,  # Column J
                 "", "Please Check VIN" if has_vin_by_vendor[vendor] else "",
-                "", "\n".join(sku_messages)  # Column M now gets incoming/instock text
+                "", "\n".join(sku_messages)  # Column M
             ])
 
         start_row = max(2, get_last_row())  # Ensure we append and don't overwrite header
@@ -414,14 +413,14 @@ def add_backup_shipping_note(data):
             # Column J logic: Keep TBC (No) if applicable
             this_status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
 
-            # Column M logic: Detailed per-SKU messages
+            # Column M logic: Combine SKUs by stock status
+            incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
+            instock_skus = [item.get('sku') for item in vendor_items if int(item.get('available', 0)) > 0]
             sku_messages = []
-            for item in vendor_items:
-                sku = item.get('sku')
-                if int(item.get('incoming', 0)) > 0:
-                    sku_messages.append(f"Notice: 📦 Incoming stock on the way for {sku}")
-                elif int(item.get('available', 0)) > 0:
-                    sku_messages.append(f"Notice: 📦 In stock for {sku}")
+            if incoming_skus:
+                sku_messages.append(f"Notice: 📦 Incoming stock on the way for SKUs: {', '.join(incoming_skus)}")
+            if instock_skus:
+                sku_messages.append(f"In stock for {', '.join(instock_skus)}")
 
             rows_data.append([
                 order_created,
@@ -430,9 +429,9 @@ def add_backup_shipping_note(data):
                 ', '.join(skus),
                 vendor,
                 order_country,
-                "", "", "", this_status,  # Column J still gets TBC (No)
+                "", "", "", this_status,  # Column J
                 "", "Please Check VIN" if has_vin_by_vendor[vendor] else "",
-                "", "\n".join(sku_messages)  # Column M now gets incoming/instock text
+                "", "\n".join(sku_messages)  # Column M
             ])
 
         start_row = max(2, get_last_row())  # Ensure we append and don't overwrite header
