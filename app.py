@@ -1,4 +1,4 @@
-# 26 June: Add instock and In-coming
+# 4 July: Add instock and In-coming to status
 from flask import Flask, request, jsonify
 import logging
 from datetime import datetime
@@ -207,6 +207,13 @@ def process_order(data):
 
             # Column J logic: Keep TBC (No) if applicable
             this_status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
+            if not this_status:
+                incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
+                instock_skus = [item.get('sku') for item in vendor_items if int(item.get('available', 0)) > 0]
+                if incoming_skus:
+                    this_status = "In Coming"
+                elif instock_skus:
+                    this_status = "In Stock"
 
             # Column M logic: Combine SKUs by stock status
             incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
@@ -412,6 +419,13 @@ def add_backup_shipping_note(data):
 
             # Column J logic: Keep TBC (No) if applicable
             this_status = "TBC (No)" if order_total > 500 and has_vin_tag else ""
+            if not this_status:
+                incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
+                instock_skus = [item.get('sku') for item in vendor_items if int(item.get('available', 0)) > 0]
+                if incoming_skus:
+                    this_status = "In Coming"
+                elif instock_skus:
+                    this_status = "In Stock"
 
             # Column M logic: Combine SKUs by stock status
             incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
