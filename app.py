@@ -211,7 +211,7 @@ def process_order(data):
                 incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
                 instock_skus = [item.get('sku') for item in vendor_items if int(item.get('available', 0)) > 0]
                 if incoming_skus:
-                    this_status = "In Coming"
+                    this_status = "Incoming"
                 elif instock_skus:
                     this_status = "In Stock"
 
@@ -423,7 +423,7 @@ def add_backup_shipping_note(data):
                 incoming_skus = [item.get('sku') for item in vendor_items if int(item.get('incoming', 0)) > 0]
                 instock_skus = [item.get('sku') for item in vendor_items if int(item.get('available', 0)) > 0]
                 if incoming_skus:
-                    this_status = "In Coming"
+                    this_status = "Incoming"
                 elif instock_skus:
                     this_status = "In Stock"
 
