@@ -93,7 +93,7 @@ def group_skus_by_vendor(line_items):
     has_vin_by_vendor = {}  # Track if any item for the vendor has a VIN
     for item in line_items:
         #sku, vendor, vin = item.get('sku', 'Unknown SKU'), item.get('vendor', 'Unknown Vendor'), item.get('vin', '')
-        sku = item.get('sku', 'Unknown SKU')
+        sku = html.unescape(item.get('sku', 'Unknown SKU'))
         vendor = html.unescape(item.get('vendor', 'Unknown Vendor'))  # Decode HTML entities
         vin = item.get('vin', '')
         if vendor not in sku_by_vendor:
