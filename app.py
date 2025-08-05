@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import time
 import re
 from googleapiclient.errors import HttpError
+import html
+
 
 load_dotenv()
 app = Flask(__name__)
@@ -203,6 +205,7 @@ def process_order(data):
 
         rows_data = []
         for vendor, skus in sku_by_vendor.items():
+            vendor = html.unescape(vendor)
             vendor_items = [item for item in line_items if item.get('vendor') == vendor]
 
             # Column J logic: Keep TBC (No) if applicable
@@ -415,6 +418,7 @@ def add_backup_shipping_note(data):
         sku_by_vendor, has_vin_by_vendor = group_skus_by_vendor(line_items)
         rows_data = []
         for vendor, skus in sku_by_vendor.items():
+            vendor = html.unescape(vendor)
             vendor_items = [item for item in line_items if item.get('vendor') == vendor]
 
             # Column J logic: Keep TBC (No) if applicable
